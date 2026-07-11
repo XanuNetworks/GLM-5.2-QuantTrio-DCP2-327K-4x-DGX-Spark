@@ -1,0 +1,147 @@
+--- a/vllm/model_executor/layers/sparse_attn_indexer.py
++++ b/vllm/model_executor/layers/sparse_attn_indexer.py
+@@ -12,6 +12,9 @@
+ from vllm.config import CUDAGraphMode
+ from vllm.forward_context import get_forward_context
+ from vllm.model_executor.custom_op import CustomOp
++from vllm.logger import init_logger
++
++logger = init_logger(__name__)
+ from vllm.platforms import current_platform
+ from vllm.triton_utils import HAS_TRITON, tl, triton
+ from vllm.utils.import_utils import has_deep_gemm
+@@ -1238,49 +1241,73 @@
+                 dcp_rank,
+                 cp_kv_cache_interleave_size,
+             ) = _get_dcp_warmup_params()
+-            _prewarm_b12x_paged_indexer_prefill(
+-                q_quant=q_quant,
+-                weights=weights,
+-                kv_cache=kv_cache,
+-                topk_tokens=int(topk_tokens),
+-                profile_q_rows=profile_q_rows,
+-                profile_k_rows=warmup_k_rows,
+-                page_table_k_rows=profile_k_rows,
+-            )
+-            if dcp_world_size > 1:
+-                dcp_profile_k_rows = _get_dcp_local_k_rows(
+-                    profile_k_rows,
+-                    dcp_world_size,
+-                    dcp_rank,
+-                    cp_kv_cache_interleave_size,
+-                )
+-                dcp_warmup_k_rows = _get_b12x_paged_indexer_profile_warmup_k_rows(
+-                    dcp_profile_k_rows
++            # glm52-gb10 patch (tony's NF3 fix pattern): on sm_121a some
++            # CuteDSL prewarm shapes fail atom_tma_partition ("Operation
++            # creation failed"). Prewarm is a precompile optimization only —
++            # tolerate per-variant failures and let runtime shapes compile
++            # on demand.
++            try:
++                _prewarm_b12x_paged_indexer_prefill(
++                    q_quant=q_quant,
++                    weights=weights,
++                    kv_cache=kv_cache,
++                    topk_tokens=int(topk_tokens),
++                    profile_q_rows=profile_q_rows,
++                    profile_k_rows=warmup_k_rows,
++                    page_table_k_rows=profile_k_rows,
+                 )
+-                if dcp_warmup_k_rows != warmup_k_rows:
+-                    _prewarm_b12x_paged_indexer_prefill(
+-                        q_quant=q_quant,
+-                        weights=weights,
+-                        kv_cache=kv_cache,
+-                        topk_tokens=int(topk_tokens),
+-                        profile_q_rows=profile_q_rows,
+-                        profile_k_rows=dcp_warmup_k_rows,
+-                        page_table_k_rows=dcp_profile_k_rows,
++                if dcp_world_size > 1:
++                    dcp_profile_k_rows = _get_dcp_local_k_rows(
++                        profile_k_rows,
++                        dcp_world_size,
++                        dcp_rank,
++                        cp_kv_cache_interleave_size,
+                     )
+-            _prewarm_b12x_dcp_topk_merge(
+-                q_rows=profile_q_rows,
+-                topk_tokens=int(topk_tokens),
+-                dcp_world_size=dcp_world_size,
+-                dcp_rank=dcp_rank,
+-                cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
+-                device=q_quant.device,
+-            )
+-            _prewarm_b12x_contiguous_prefill_variants(
+-                q_quant=q_quant,
+-                weights=weights,
+-                topk_tokens=int(topk_tokens),
+-                profile_q_rows=profile_q_rows,
+-            )
++                    dcp_warmup_k_rows = _get_b12x_paged_indexer_profile_warmup_k_rows(
++                        dcp_profile_k_rows
++                    )
++                    if dcp_warmup_k_rows != warmup_k_rows:
++                        _prewarm_b12x_paged_indexer_prefill(
++                            q_quant=q_quant,
++                            weights=weights,
++                            kv_cache=kv_cache,
++                            topk_tokens=int(topk_tokens),
++                            profile_q_rows=profile_q_rows,
++                            profile_k_rows=dcp_warmup_k_rows,
++                            page_table_k_rows=dcp_profile_k_rows,
++                        )
++            except Exception as _e:
++                logger.warning(
++                    "glm52-gb10: b12x paged-indexer prewarm failed on this "
++                    "platform (%s); continuing without precompiled variants.",
++                    _e,
++                )
++            try:
++                _prewarm_b12x_dcp_topk_merge(
++                    q_rows=profile_q_rows,
++                    topk_tokens=int(topk_tokens),
++                    dcp_world_size=dcp_world_size,
++                    dcp_rank=dcp_rank,
++                    cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
++                    device=q_quant.device,
++                )
++            except Exception as _e:
++                logger.warning(
++                    "glm52-gb10: b12x dcp topk-merge prewarm failed (%s); "
++                    "continuing.", _e,
++                )
++            try:
++                _prewarm_b12x_contiguous_prefill_variants(
++                    q_quant=q_quant,
++                    weights=weights,
++                    topk_tokens=int(topk_tokens),
++                    profile_q_rows=profile_q_rows,
++                )
++            except Exception as _e:
++                logger.warning(
++                    "glm52-gb10: b12x contiguous-prefill prewarm failed (%s); "
++                    "continuing.", _e,
++                )
+         else:
+             # Reserve workspace for indexer during profiling run.
+             current_workspace_manager().get_simultaneous(
+@@ -1830,6 +1857,19 @@
+         self.max_model_len = max_model_len
+         self.max_total_seq_len = max_total_seq_len
+         self.topk_indices_buffer = topk_indices_buffer
++        if topk_scores_buffer is None and topk_indices_buffer is not None:
++            try:
++                from vllm.distributed.parallel_state import get_dcp_group
++
++                dcp_world_size = get_dcp_group().world_size
++            except Exception:
++                dcp_world_size = 1
++            if dcp_world_size > 1 and use_b12x_sparse_indexer():
++                topk_scores_buffer = torch.empty(
++                    topk_indices_buffer.shape,
++                    dtype=torch.float32,
++                    device=topk_indices_buffer.device,
++                )
+         self.topk_scores_buffer = topk_scores_buffer
+         self.skip_k_cache_insert = skip_k_cache_insert
+         self.use_fp4_cache = use_fp4_cache

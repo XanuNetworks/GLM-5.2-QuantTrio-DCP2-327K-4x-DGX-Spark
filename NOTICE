@@ -1,0 +1,29 @@
+GLM-5.2 QuantTrio DCP2-327K recipe for 4x NVIDIA DGX Spark (GB10)
+
+The model this recipe serves:
+
+- GLM-5.2 by Z.ai (Zhipu AI) — the model itself, including the in-checkpoint
+  MTP draft layer and DSA sparse attention that make this deployment possible.
+  https://z.ai / https://huggingface.co/zai-org
+- QuantTrio — the unpruned Int4-Int8Mix quantization of GLM-5.2.
+  https://huggingface.co/QuantTrio
+
+This repository adapts and builds upon the following Apache-2.0 licensed work:
+
+- CosmicRaisins/glm-5.2-gb10 — the GLM-5.2 sm_121 serving stack, the
+  DCP2/DCP4 recipes this repo reproduces, the vendored vLLM patches, and the
+  index_topk_pattern and clear_thinking findings.
+  https://github.com/CosmicRaisins/glm-5.2-gb10
+- tonyd2wild/GLM-5.2-QuantTrio-200K-4x-DGX-Spark — the QuantTrio recipe
+  lineage, launch harness this repo's launcher derives from, and the indexer
+  MTP-overhang fix.
+  https://github.com/tonyd2wild/GLM-5.2-QuantTrio-200K-4x-DGX-Spark
+- local-inference-lab/vllm (branch codex/dcp-globaltopk-sharddraft-defaults-20260622)
+  and the vLLM project — the serving engine. Patch files in patches/ and
+  upstream-lse-experiment/ contain code derived from vLLM (Apache-2.0,
+  Copyright contributors to the vLLM project).
+- lukealonso/b12x — the CUDA-graph-safe sparse-MLA kernel library.
+- eugr/spark-vllm-docker — the image build harness.
+
+Additional community credit (NVIDIA GB10 forum, thread 374125): ciprianveg,
+Zatz, m9e, voipmonitor, back199640, aidendle94.

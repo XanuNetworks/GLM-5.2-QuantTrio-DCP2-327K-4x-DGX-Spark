@@ -1,0 +1,58 @@
+--- a/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py
++++ b/vllm/v1/attention/backends/mla/flashinfer_mla_sparse_sm120.py
+@@ -32,6 +32,13 @@
+ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata]):
+     """SM120 FlashInfer sparse-MLA implementation."""
+ 
++    # glm52-dcp patch: FlashInfer's trtllm_batch_decode_with_kv_cache_mla
++    # accepts return_lse (verified in flashinfer 0.6.14), so this impl CAN
++    # return the decode LSE that DCP's cross-rank merge requires. Upstream
++    # never plumbed it through; see forward_mqa below. Mirrors the parent
++    # FlashInferMLASparseImpl's LSE handling.
++    can_return_lse_for_decode = True
++
+     def __init__(
+         self,
+         num_heads: int,
+@@ -126,8 +133,12 @@
+             ),
+         )
+ 
++        # glm52-dcp patch: size the out buffer from the query's actual head
++        # count, not self.num_heads. Under DCP the MLA decode all-gathers
++        # queries across ranks, so each rank sees the FULL head count (64)
++        # rather than the TP-local slice (16) — self.num_heads is stale here.
+         output = q.new_empty(
+-            (num_actual_toks, self.num_heads, self.kv_lora_rank),
++            (num_actual_toks, q.shape[1], self.kv_lora_rank),
+             dtype=q.dtype,
+         )
+ 
+@@ -153,5 +164,27 @@
+             bmm2_scale=1.0,
+             sparse_mla_top_k=attn_metadata.topk_tokens,
+             kv_scale_format=self.kv_scale_format,
++            # glm52-dcp patch: ask the kernel for the decode LSE when DCP
++            # needs it for the cross-rank merge (base class sets this flag
++            # only when dcp_world_size > 1).
++            return_lse=self.need_to_return_lse_for_decode,
+         )
++        if self.need_to_return_lse_for_decode:
++            # With return_lse=True flashinfer returns (out, lse).
++            assert isinstance(out, tuple), (
++                "expected (out, lse) tuple from flashinfer when return_lse=True"
++            )
++            o, lse = out
++            o = o.view(-1, o.shape[-2], o.shape[-1])
++            # Reuse the parent impl's LSE normalization + empty-row masking
++            # conventions (the shared DCP reducer expects (num_tokens, num_heads)
++            # and -inf LSE on rows with no valid top-k indices).
++            from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
++                FlashInferMLASparseImpl as _ParentImpl,
++            )
++            lse = _ParentImpl._normalize_lse(lse, o.shape[0], o.shape[1])
++            empty_rows = (topk_indices_physical == -1).all(dim=-1)
++            o.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
++            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
++            return o, lse
+         return out.squeeze(1), None
