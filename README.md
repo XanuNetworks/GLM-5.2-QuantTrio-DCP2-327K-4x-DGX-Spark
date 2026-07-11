@@ -14,6 +14,7 @@ the stack in one specific, fixable way (below).
 | test | t/s | peak t/s |
 |---|---|---|
 | pp2048 | 355–364 | |
+| tg64 | 12.8 | 17.7 |
 | tg512 | 12.8–13.9 | 20.0–22.7 |
 | pp2048 @ d8192 | 326 | |
 | tg512 @ d8192 | 13.0–13.6 | 19.7–21.3 |
