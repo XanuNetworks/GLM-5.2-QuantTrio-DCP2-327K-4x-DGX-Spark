@@ -1,57 +1,47 @@
-# GLM-5.2 (unpruned QuantTrio) at 327K context on 4× DGX Spark — DCP2 recipe, validated on the new firmware (driver 580.159.03)
+# GLM-5.2 @ 327K on 4× DGX Spark
 
-A complete, follower-replicable deployment of **GLM-5.2** — the unpruned QuantTrio
-`GLM-5.2-Int4-Int8Mix` checkpoint, all 256 experts — across **4× NVIDIA DGX Spark
-(GB10)** at **327,680-token context** via TP4 + DCP2, with MTP speculative decode
-and fp8 sparse-MLA KV. This reproduces
-[CosmicRaisins' DCP2-320K recipe](https://github.com/CosmicRaisins/glm-5.2-gb10)
-and documents everything needed to run it on the **current DGX Spark firmware
-(driver 580.159.03)** — which no published recipe covers yet, and which breaks
-the stack in one specific, fixable way (below).
+**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) at 327,680-token context across four GB10 Sparks — TP4 + DCP2, MTP speculative decode, fp8 sparse-MLA KV.**
 
-**Measured (llama-benchy, recipe methodology — 3 runs, coherent corpus; final
-config: gmu 0.89, lossless RoCE, 2026-07-12):**
+![context](https://img.shields.io/badge/context-327K-1f6feb)
+![hardware](https://img.shields.io/badge/hardware-4×_DGX_Spark_(GB10)-76b900)
+![decode](https://img.shields.io/badge/decode-~14_tok%2Fs_·_20_peak-blue)
+![prefill](https://img.shields.io/badge/prefill-~365_tok%2Fs-blue)
+![firmware](https://img.shields.io/badge/driver-580.159.03_✓-orange)
+![license](https://img.shields.io/badge/license-Apache_2.0-lightgrey)
+
+A follower-replicable deployment reproducing [CosmicRaisins' DCP2-320K recipe](https://github.com/CosmicRaisins/glm-5.2-gb10) — and the first to document running it on the **current DGX Spark firmware** (driver 580.159.03), which breaks the stack in one specific, fixable way.
+
+> [!WARNING]
+> **On the new firmware, b12x kernels won't compile under `nvidia-cutlass-dsl==4.5.2`** (`ValueError: Operation creation failed`). Pin **4.5.3** — see [Build](#stack--build). If you're about to take the firmware update, do this first and save yourself the debugging session.
+
+### What you get
+
+- 🧠 **Full model, no pruning** — all 256 experts, at 327K context on 4 nodes.
+- 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
+- 🔁 **Two lanes, one script** — `GLM_LANE=dcp2` for 327K, or the upstream-vLLM fallback at 200K/~25 t/s.
+- 🛡️ **Battle-tested ops** — a unified-memory watchdog (GB10 OOM = frozen box otherwise), auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect.
+
+### Benchmarks
+
+llama-benchy, recipe methodology (3 runs, coherent corpus; final config — gmu 0.89, lossless RoCE, 2026-07-12):
 
 | test | t/s | peak t/s |
 |---|---|---|
-| pp2048 | 365–367 | |
+| pp2048 | **365–367** | |
 | tg64 | 14.3 ± 0.8 | 19.7 |
 | tg512 | 12.2 ± 0.6 | 20.0 |
 | pp2048 @ d32768 | 318 | |
 | tg64 @ d32768 | 12.7 | 18.0 |
 
-Flat-to-depth holds (~−8% decode d0→32K); a manual 156K-deep request decoded at
-14.7 t/s with correct long-range retrieval. MTP acceptance 51–59% (mean accepted
-length 2.8–3.05). Prefill is chunk-limited by a deliberate memory trade
-(see Gotcha 2). Mean decode runs below the reference tables (~12–14 vs ~22) with
-peaks matching (~20) — under investigation with the community. Every
-infrastructure suspect has been measured and eliminated: NCCL on RDMA verbs (not
-TCP), all 8 rails at full 200G with zero PHY errors, single-vs-dual rail,
-NCHANNELS 4/8, MTP k=3/4, and a hardware-verified lossless fabric (see the
-Lossless RoCE section). The residual sits in per-step kernel time on the
-driver 580.159.03 + cutlass-dsl 4.5.3 combo — a pairing no other cluster runs
-yet.
+MTP acceptance 51–59% (mean accepted length 2.8–3.05). Prefill is chunk-limited by a deliberate memory trade ([Gotcha 2](#gotchas-all-learned-the-hard-way)).
 
-## THE FIRMWARE LANDMINE (read this first)
+<details>
+<summary><b>Open question: mean decode ~12–14 vs the reference ~22 (peaks match)</b></summary>
 
-On driver **580.159.03**, every b12x CuteDSL kernel fails to compile under
-`nvidia-cutlass-dsl==4.5.2` (what all pre-firmware recipes implicitly use):
+Every infrastructure suspect has been measured and eliminated: NCCL on RDMA verbs (not TCP), all 8 rails at full 200G with zero PHY errors, single-vs-dual rail, NCHANNELS 4/8, MTP k=3/4, and a hardware-verified lossless fabric ([below](#lossless-roce-ecn--pfc--optional-worth-it)). The residual sits in per-step kernel time on the driver 580.159.03 + cutlass-dsl 4.5.3 combo — a pairing no other cluster runs yet. Discussion in [forum thread 374125](https://forums.developer.nvidia.com/t/glm-5-2-on-a-4x-gb10-cluster-22-tok-s-decode-256k-ctx-recipe/374125).
+</details>
 
-```
-ValueError: Operation creation failed
-  ...nvidia_cutlass_dsl/.../_cute_nvgpu_ops_gen.py: atom_tma_partition
-  via b12x/cute/compiler.py -> cutlass_dsl/cutlass.py: launch
-```
-
-Fix — bake into your image:
-
-```bash
-pip install 'nvidia-cutlass-dsl==4.5.3' 'nvidia-cutlass-dsl-libs-cu13==4.5.3'
-```
-
-Verified on: driver 580.159.03, ptxas 13.0, torch 2.11.0+cu130.
-
-## Stack
+## Stack & build
 
 - **vLLM:** [`local-inference-lab/vllm`](https://github.com/local-inference-lab/vllm)
   branch `codex/dcp-globaltopk-sharddraft-defaults-20260622` @ `e232d26`,
@@ -59,7 +49,17 @@ Verified on: driver 580.159.03, ptxas 13.0, torch 2.11.0+cu130.
   `draft-quant-packed-mapping`) — apply with `patch -p1` against the installed
   tree; all apply cleanly at that ref.
 - **b12x:** `pip install --no-deps 'git+https://github.com/lukealonso/b12x@9cd63a7'`
-- **cutlass-dsl:** `==4.5.3` (see landmine above)
+- **cutlass-dsl:** `pip install 'nvidia-cutlass-dsl==4.5.3' 'nvidia-cutlass-dsl-libs-cu13==4.5.3'`
+
+> [!WARNING]
+> **The firmware landmine.** On driver **580.159.03**, every b12x CuteDSL kernel fails to compile under `nvidia-cutlass-dsl==4.5.2` (what pre-firmware recipes implicitly use):
+> ```
+> ValueError: Operation creation failed
+>   ...nvidia_cutlass_dsl/.../_cute_nvgpu_ops_gen.py: atom_tma_partition
+>   via b12x/cute/compiler.py -> cutlass_dsl/cutlass.py: launch
+> ```
+> Pinning **4.5.3** (above) fixes it. Verified on: driver 580.159.03, ptxas 13.0, torch 2.11.0+cu130.
+
 - **Image build:** [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)
   harness. Three temporary Dockerfile edits are needed to build a fork ref
   (revert after building):
