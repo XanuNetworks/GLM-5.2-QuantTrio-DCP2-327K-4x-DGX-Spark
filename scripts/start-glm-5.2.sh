@@ -76,6 +76,26 @@ else
   done
 fi
 
+# Preflight: (re)apply NIC PFC/DSCP-trust on every node — mlnx_qos settings
+# don't survive reboots. Runs via privileged container (mlnx_qos needs
+# CAP_NET_ADMIN; --pid host avoids netlink PID collisions). Pairs with the
+# the switch's RoCE QoS traffic class; verified 2026-07-12: zero packet loss
+# (packet_seq_err +0) across a 78K-token prefill.
+echo "[preflight] applying NIC PFC prio-3 + DSCP trust on all nodes ..."
+for ip in 11 12 13 14; do
+  ok=0
+  for dev in enp1s0f0np0 enP2p1s0f0np0; do
+    ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "docker run --rm --privileged --network host --pid host \
+      -v /usr/bin/mlnx_qos:/usr/local/bin/mlnx_qos:ro \
+      -v /usr/lib/python3/dist-packages/dcbnetlink.py:/deps/dcbnetlink.py:ro \
+      -v /usr/lib/python3/dist-packages/netlink.py:/deps/netlink.py:ro \
+      -v /usr/lib/python3/dist-packages/genetlink.py:/deps/genetlink.py:ro \
+      -e PYTHONPATH=/deps \
+      --entrypoint python3 vllm-node-eldritch-dcp:e232d26-modded /usr/local/bin/mlnx_qos -i ${dev} --trust dscp --pfc 0,0,0,1,0,0,0,0 >/dev/null 2>&1" && ok=$((ok+1))
+  done
+  echo "  .${ip}: PFC applied on ${ok}/2 rails"
+done
+
 # Preflight: drop page cache on every node (tony's README Gotcha 6).
 # GB10 kernel-reclaim can stall the model load; freeing 15-30 GB of
 # page cache guarantees vLLM sees enough for --gpu-memory-utilization 0.91.

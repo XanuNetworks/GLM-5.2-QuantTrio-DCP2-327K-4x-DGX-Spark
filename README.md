@@ -9,25 +9,28 @@ and documents everything needed to run it on the **current DGX Spark firmware
 (driver 580.159.03)** — which no published recipe covers yet, and which breaks
 the stack in one specific, fixable way (below).
 
-**Measured (llama-benchy, recipe methodology — pp2048/tg512, 3 runs, coherent corpus):**
+**Measured (llama-benchy, recipe methodology — 3 runs, coherent corpus; final
+config: gmu 0.89, lossless RoCE, 2026-07-12):**
 
 | test | t/s | peak t/s |
 |---|---|---|
-| pp2048 | 355–364 | |
-| tg64 | 12.8 | 17.7 |
-| tg512 | 12.8–13.9 | 20.0–22.7 |
-| pp2048 @ d8192 | 326 | |
-| tg512 @ d8192 | 13.0–13.6 | 19.7–21.3 |
-| pp2048 @ d32768 | 315 | |
-| tg512 @ d32768 | 12.7–12.9 | 18.3–20.7 |
+| pp2048 | 365–367 | |
+| tg64 | 14.3 ± 0.8 | 19.7 |
+| tg512 | 12.2 ± 0.6 | 20.0 |
+| pp2048 @ d32768 | 318 | |
+| tg64 @ d32768 | 12.7 | 18.0 |
 
-Flat-to-depth holds (−8% decode d0→32K); a manual 156K-deep request decoded at
+Flat-to-depth holds (~−8% decode d0→32K); a manual 156K-deep request decoded at
 14.7 t/s with correct long-range retrieval. MTP acceptance 51–59% (mean accepted
 length 2.8–3.05). Prefill is chunk-limited by a deliberate memory trade
-(see Gotcha 2). Mean decode runs below the reference tables (~13 vs ~22) with
-peaks matching — under investigation with the community; every infrastructure
-suspect (NCCL transport, rails, channels, MTP k) has been measured and
-eliminated (see forum thread).
+(see Gotcha 2). Mean decode runs below the reference tables (~12–14 vs ~22) with
+peaks matching (~20) — under investigation with the community. Every
+infrastructure suspect has been measured and eliminated: NCCL on RDMA verbs (not
+TCP), all 8 rails at full 200G with zero PHY errors, single-vs-dual rail,
+NCHANNELS 4/8, MTP k=3/4, and a hardware-verified lossless fabric (see the
+Lossless RoCE section). The residual sits in per-step kernel time on the
+driver 580.159.03 + cutlass-dsl 4.5.3 combo — a pairing no other cluster runs
+yet.
 
 ## THE FIRMWARE LANDMINE (read this first)
 
@@ -129,11 +132,13 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
    watchdog `docker kill`s the vLLM container when MemAvailable < 1.5 GiB
    (1 s poll). Every OOM since has been a clean container kill. The start
    wrapper arms it automatically for DCP lanes.
-2. **`--max-num-batched-tokens 2048`, not the recipe's 4096.** Deep prefills
-   (150K+) transiently need more activation headroom than the head node has at
-   gmu 0.90; 4096-token chunks tripped the watchdog. Halving the chunk halves
-   the transient — the cost is prefill rate (~355 vs ~600 t/s). If your nodes
-   run leaner than ours, try 4096 first.
+2. **`--max-num-batched-tokens 2048` (recipe: 4096) and `gmu 0.89` (recipe:
+   0.90).** Deep prefills (150K+) and long tg benches transiently need more
+   activation headroom than the head node has; 4096 chunks and gmu 0.90 both
+   tripped the 1.5 GiB watchdog. Halving the chunk halves the prefill transient
+   (cost: prefill rate); gmu 0.89 buys ~1.1 GiB more permanent floor per node
+   (cost: ~2% KV pool). Head now sits ~3.9 GiB idle. If your nodes run leaner,
+   try the recipe's values first.
 3. **RoCE GID index can differ per node** (ours did pre-firmware: 3/3/4/4).
    `scripts/glm52-entrypoint.sh` is bind-mounted and auto-detects the RoCEv2
    IPv4 GID at container start instead of hardcoding `NCCL_IB_GID_INDEX`.
@@ -146,6 +151,36 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
 6. **`docker commit --change 'ENTRYPOINT ...'` quoting**: `\"` inside the
    change value silently produces a broken `/bin/sh -c` entrypoint. Verify
    with `docker inspect --format '{{.Config.Entrypoint}}'` after committing.
+
+## Lossless RoCE (ECN + PFC) — optional, worth it
+
+DCP's per-step syncs are small and latency-bound, so decode never loses packets
+— but big prefill all-gathers overrun a plain L2 switch and eat go-back-N
+retransmits. If your switch supports RoCE QoS (ECN/DCQCN + PFC on a dedicated
+traffic class), configuring it per your vendor's lossless-RoCE guide is worth
+it. Verify with the NIC hardware counters
+(`/sys/class/infiniband/<hca>/ports/1/hw_counters/{packet_seq_err,out_of_sequence,rp_cnp_handled,np_cnp_sent}`,
+diffed around an isolated ~78K-token prefill):
+
+| stage | packet_seq_err / big prefill |
+|---|---|
+| raw (no QoS) | ~1,000–2,200 per sender |
+| + ECN/DCQCN | ~90 (−95%) |
+| + PFC | **0 (lossless)** |
+
+The catch that cost us an afternoon: the switch QoS config does **nothing** on
+its own — NCCL sends at DSCP 0 by default and sails past every classifier. The
+missing key is node-side `NCCL_IB_TC=106` (→ DSCP 26, which the switch then maps
+to the RoCE traffic class), already set in `scripts/glm-launch.sh`. PFC on the
+NICs is `mlnx_qos -i <dev> --trust dscp --pfc 0,0,0,1,0,0,0,0` on both rails per
+node — needs root and isn't reboot-persistent, so `start-glm-5.2.sh` reapplies
+it in preflight via a privileged container (`--privileged --network host --pid
+host`; **`--pid host` is required** or the netlink bind fails "Address already
+in use").
+
+Payoff was honest: prefill throughput unchanged (drops were ~0.1% of volume),
+but decode picked up ~+10% (queue prioritization trimming latency jitter on the
+small sync ops) and the fabric is now clean instead of accidentally-working.
 
 ## Bonus: DCP on *upstream* vLLM (experiment)
 

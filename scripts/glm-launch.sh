@@ -27,7 +27,7 @@ set -uo pipefail
 # CONFIG — edit these for your cluster
 # ============================================================================
 # EDIT: RoCE rail IPs, rank 0 (head) FIRST. Run this script from the head node.
-# (Our fabric: a managed switch on 192.168.NNN.0/24, MTU 9000.)
+# (RoCE fabric on a managed switch, MTU 9000.)
 NODES=(192.168.NNN.1 192.168.NNN.2 192.168.NNN.3 192.168.NNN.4)
 
 # EDIT: SSH key the head node uses to reach the workers (key-based, no prompt).
@@ -152,6 +152,11 @@ ENVV=(
   -e "NCCL_CUMEM_ENABLE=0"
   -e "NCCL_IGNORE_CPU_AFFINITY=1"
   -e "NCCL_DEBUG=WARN"
+  # DSCP 26 marking (IB TC 106 >> 2 = 26): lets the switch classify RoCE into
+  # its ECN-marked queue (switch RoCE QoS). Counter evidence
+  # 2026-07-12: prefill all-gathers drop packets on the lossy fabric
+  # (packet_seq_err ~1K/sender per 40K-token prefill); decode is loss-free.
+  -e "NCCL_IB_TC=106"
 )
 # V2 model runner: DCP lane ONLY. Needed there for the draft-under-DCP path
 # (fork parity, thread 375416). On the fast lane it silently switches autotune
@@ -327,7 +332,11 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     # transient tripped the 1.5 GiB watchdog on the head (1.48 GiB, 18:19).
     # Halving the chunk halves the transient; costs some prefill throughput.
     --max-model-len 327680 --max-num-seqs 1 --max-num-batched-tokens 2048
-    --gpu-memory-utilization 0.90 --kv-cache-dtype fp8_ds_mla
+    # gmu 0.89 (recipe: 0.90): the head rode ~2.1G available and the watchdog
+    # (1.5G) killed it during a tg512 bench on 2026-07-12. -0.01 gmu ≈ +1.1G
+    # floor per node; KV pool is unaffected (auto-sized from the gmu budget,
+    # loses ~2% capacity).
+    --gpu-memory-utilization 0.89 --kv-cache-dtype fp8_ds_mla
     --async-scheduling
     --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
   )
