@@ -67,17 +67,23 @@ KERNELS_DIR="$HOME/glm-triton"
 
 # ---------------------------------------------------------------------------
 # LANE SELECTOR — all lanes run the same fork stack, differing ONLY in
-# context / concurrency / DCP size (detail + how to add a lane: scripts/README.md):
-#   dcp2       — 327K ctx, c=1, DCP2  → flagship (~25 t/s coherent)
-#   concurrent — 200K ctx, c=3, DCP2  → multi-user (~50 t/s aggregate, ~18 each)
-#   dcp4       — 655K ctx, c=1, DCP4  → max-context specialty (~24 t/s coherent)
+# context / concurrency / DCP size (detail + how to add a lane: scripts/README.md).
+# Naming: <dcp-size>[-cc<per-stream-K>]. Bare = single-stream (c=1); -ccNNN =
+# multi-user, NNN K per stream. DCP is one KV budget spent on depth OR width:
+#   dcp2        — 327K ctx, c=1, DCP2  → flagship (~25 t/s coherent)
+#   dcp2-cc200  — 200K ctx, c=3, DCP2  → multi-user (~40 t/s aggregate, ~14 each)
+#   dcp4        — 655K ctx, c=1, DCP4  → max-context specialty (~24 t/s coherent)
+#   dcp4-cc200  — 200K ctx, c=5, DCP4  → multi-user wide (~47 t/s aggregate, ~10 each)
+#   dcp4-cc128  — 128K ctx, c=8, DCP4  → max-width (DCP4's pool spread over 8 streams)
 # ---------------------------------------------------------------------------
 GLM_LANE="${GLM_LANE:-dcp2}"
 case "$GLM_LANE" in
   dcp2)       L_MAXLEN=327680; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10; L_DCP=2 ;;
-  concurrent) L_MAXLEN=200000; L_SEQS=3; L_BATCHED=4096; L_CAPTURE=16; L_DCP=2 ;;
+  dcp2-cc200) L_MAXLEN=200000; L_SEQS=3; L_BATCHED=4096; L_CAPTURE=16; L_DCP=2 ;;
   dcp4)       L_MAXLEN=655360; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10; L_DCP=4 ;;
-  *) echo "GLM_LANE must be dcp2 (327K,c=1), concurrent (200K,c=3), or dcp4 (655K,c=1); got '$GLM_LANE'" >&2; exit 1 ;;
+  dcp4-cc200) L_MAXLEN=200000; L_SEQS=5; L_BATCHED=2048; L_CAPTURE=32; L_DCP=4; L_GMU=0.88 ;;  # gmu 0.88: 5 concurrent DEEP prefills need +1.1GiB head headroom (0.89 watchdog-killed). batched 2048 interleaves prefill/decode fairly. Validated: 5x197K preempt=0, head floor 2.07GiB.
+  dcp4-cc128) L_MAXLEN=131072; L_SEQS=8; L_BATCHED=2048; L_CAPTURE=48; L_DCP=4; L_GMU=0.88 ;;  # gmu 0.88 too (8 streams). Not yet deep-fill validated.
+  *) echo "GLM_LANE must be dcp2 (327K,c=1), dcp2-cc200 (200K,c=3), dcp4 (655K,c=1), dcp4-cc200 (200K,c=5), or dcp4-cc128 (128K,c=8); got '$GLM_LANE'" >&2; exit 1 ;;
 esac
 # ============================================================================
 
@@ -178,7 +184,7 @@ BASE=(
 # host Triton kernel mounts and the LSE patch mount MUST be dropped (they'd
 # shadow fork files with incompatible upstream-era code).
 # ---------------------------------------------------------------------------
-if [ "$GLM_LANE" = "dcp2" ] || [ "$GLM_LANE" = "concurrent" ] || [ "$GLM_LANE" = "dcp4" ]; then
+if true; then  # every lane runs the fork stack (the top-of-file case validated GLM_LANE)
   IMAGE="vllm-node-eldritch-dcp:e232d26-modded"
   KMOUNTS=(
     # glm52-gb10 prewarm-tolerance patch (tony's NF3 fix pattern): sm_121a
@@ -252,7 +258,7 @@ if [ "$GLM_LANE" = "dcp2" ] || [ "$GLM_LANE" = "concurrent" ] || [ "$GLM_LANE" =
     # drove it through the ~1.5G floor on 2026-07-12. -0.01 gmu ≈ +1.1G
     # floor per node; KV pool is unaffected (auto-sized from the gmu budget,
     # loses ~2% capacity).
-    --gpu-memory-utilization 0.89 --kv-cache-dtype fp8_ds_mla
+    --gpu-memory-utilization ${GLM_GMU:-${L_GMU:-0.89}} --kv-cache-dtype fp8_ds_mla
     --async-scheduling
     --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":'"${L_CAPTURE}"'}'
   )

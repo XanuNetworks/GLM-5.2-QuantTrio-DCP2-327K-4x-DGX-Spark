@@ -8,7 +8,7 @@
 # (NODES, users, IPs, image name). See project_glm_5_2_cluster.md for full details.
 #
 # Endpoint:  http://192.168.NNN.1:8000/v1  (served-model-name: glm-5.2)
-# Max ctx:   327680 (dcp2, default) / 200000 (concurrent lane)
+# Max ctx:   327680 dcp2 · 655360 dcp4 · 200000 -cc200 lanes · 131072 dcp4-cc128
 # Cold boot: ~12 min weight load + ~10 min cudagraph warmup = ~22 min to serve
 #
 # Usage:
@@ -87,7 +87,7 @@ if [ "$clock_bad" = 1 ] && [ "${GLM_SKIP_CLOCK_CHECK:-0}" != 1 ]; then
   exit 1
 fi
 
-# Memory watchdog: both lanes run DCP and can press the unified-memory floor, so
+# Memory watchdog: every lane runs DCP and can press the unified-memory floor, so
 # arm it on every node (a warmup once froze all 4 boxes). Detail: utils/README.
 echo "[preflight] arming memory watchdog on all 4 nodes ..."
 for ip in 11 12 13 14; do

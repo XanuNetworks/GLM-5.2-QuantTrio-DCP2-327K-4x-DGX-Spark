@@ -1,6 +1,6 @@
 # GLM-5.2 on 4× DGX Spark — pick your lane: 327K depth *or* multi-user throughput
 
-**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks — one recipe, two lanes: `dcp2` for **327K single-user** context, or `concurrent` for **multi-user serving** (~50 tok/s aggregate at c=3). TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware.**
+**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks — one recipe, one script, a lane for each job: **`dcp2`** for **327K single-user** depth (the flagship), **`dcp4`** for **655K max-context**, and **`-cc` concurrency lanes** for **multi-user serving**. TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware.**
 
 ![context](https://img.shields.io/badge/context-327K-1f6feb)
 ![hardware](https://img.shields.io/badge/hardware-4×_DGX_Spark_(GB10)-76b900)
@@ -20,7 +20,7 @@ A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://gi
 
 - 🧠 **Full model, no pruning** — all 256 experts, at 327K context on 4 nodes.
 - 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
-- 🔁 **Three lanes, one script** — `dcp2` (327K single-user, ~25 tok/s coherent), `concurrent` (200K multi-user, ~50 tok/s aggregate at c=3), or `dcp4` (655K max-context). Same fork stack, pick with `GLM_LANE`. (Details: [scripts/README](scripts/README.md).)
+- 🔁 **A lane for each job, one script** — `dcp2` (327K single-user, ~25 tok/s coherent — the flagship), `dcp4` (655K max-context, ~24 coherent), and `-cc` concurrency lanes for multi-user serving (`dcp2-cc200`: 200K, ~41 t/s aggregate at c=3). Same fork stack, pick with `GLM_LANE`. (Lane map: [scripts/README](scripts/README.md) · per-lane numbers: [benchmarks/](benchmarks/README.md).)
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
@@ -101,9 +101,11 @@ CosmicRaisins') + `scripts/glm-serve.sh` wrapper. Edit the marked
 CONFIG block (node IPs, user). Lanes via `GLM_LANE`:
 
 ```bash
-./glm-serve.sh start                      # default lane = dcp2: 327K, single-user, max-speed
-GLM_LANE=concurrent ./glm-serve.sh start  # multi-user: 200K, c=2/c=3, ~50 t/s aggregate
-GLM_LANE=dcp4 ./glm-serve.sh start        # max context: 655K, single-user (~24 t/s coherent)
+./glm-serve.sh start                        # default lane = dcp2: 327K, single-user, max-speed
+GLM_LANE=dcp2-cc200 ./glm-serve.sh start    # multi-user on DCP2: 200K, c=3, ~41 t/s aggregate
+GLM_LANE=dcp4 ./glm-serve.sh start          # max context: 655K, single-user (~24 t/s coherent)
+GLM_LANE=dcp4-cc200 ./glm-serve.sh start    # wide multi-user on DCP4: 200K, up to c=5
+# GLM_LANE=dcp4-cc128 — 128K, up to c=8 (widest; see scripts/README + benchmarks/)
 ```
 
 Key serve flags for the dcp2 lane (full command in the script):
