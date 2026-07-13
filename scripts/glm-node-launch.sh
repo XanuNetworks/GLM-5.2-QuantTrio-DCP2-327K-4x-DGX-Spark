@@ -250,14 +250,16 @@ if true; then  # every lane runs the fork stack (the top-of-file case validated 
     --tensor-parallel-size 4 --pipeline-parallel-size 1
     --decode-context-parallel-size ${L_DCP} --dcp-kv-cache-interleave-size 1
     --attention-backend B12X_MLA_SPARSE
-    # batched-tokens 2048 (recipe: 4096): the 150K-deep prefill's activation
-    # transient drove the head through the ~1.5 GiB floor (1.48 GiB, 18:19).
-    # Halving the chunk halves the transient; costs some prefill throughput.
+    # batched-tokens 2048 (recipe: 4096). Single-stream lanes: halves the
+    # deep-prefill activation transient. -cc lanes: small chunks INTERLEAVE one
+    # stream's big prefill with the others' decode (a 50K paste dips them, doesn't
+    # starve them). NB it does NOT bound concurrent-prefill working set — gmu does.
     --max-model-len ${L_MAXLEN} --max-num-seqs ${L_SEQS} --max-num-batched-tokens ${L_BATCHED}
-    # gmu 0.89 (recipe: 0.90): the head rode ~2.1G available and a tg512 bench
-    # drove it through the ~1.5G floor on 2026-07-12. -0.01 gmu ≈ +1.1G
-    # floor per node; KV pool is unaffected (auto-sized from the gmu budget,
-    # loses ~2% capacity).
+    # gpu-memory-utilization is PER-LANE (L_GMU): 0.89 single-stream, 0.88 for the
+    # -cc lanes. 5 concurrent DEEP prefills hold ~1G more rank-0 working set than a
+    # single stream and breached the ~1.5G head watchdog at 0.89; -0.01 gmu ≈ +1.1G
+    # floor/node (KV pool auto-resizes, loses ~2%). Runtime override: GLM_GMU=…
+    # Validated dcp4-cc200 cold 5x197K: preempt=0, head floor 2.07 GiB.
     --gpu-memory-utilization ${GLM_GMU:-${L_GMU:-0.89}} --kv-cache-dtype fp8_ds_mla
     --async-scheduling
     --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":'"${L_CAPTURE}"'}'

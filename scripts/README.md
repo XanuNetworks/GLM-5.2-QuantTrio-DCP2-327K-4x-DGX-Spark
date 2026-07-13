@@ -38,12 +38,28 @@ Naming: `<dcp-size>[-cc<per-stream-K>]`. Bare = single-stream (c=1); `-ccNNN` = 
 | **`dcp2`** (default) | 327K | c=1 | ~25 t/s coherent | 🏆 flagship — single-user, max depth + speed |
 | **`dcp2-cc200`** | 200K | c=3 | ~41 t/s aggregate · ~14 each · TTFT ~1.3 s | multi-user on DCP2 |
 | **`dcp4`** | 655K | c=1 | ~24 t/s coherent | max-context specialty (DCP4's 4× KV) |
-| **`dcp4-cc200`** | 200K | up to c=5 | ~47 t/s aggregate · ~10.5 each @ c=5 *(shallow)* | wide multi-user on DCP4 |
+| **`dcp4-cc200`** | 200K | up to c=5 | ~47 t/s aggregate · ~10.5 each @ c=5 · gmu 0.88 · deep-fill memory-safe | wide multi-user on DCP4 |
 | **`dcp4-cc128`** | 128K | up to c=8 | not yet benchmarked | max-width on DCP4 |
 
-Full per-lane numbers + reproduce commands: [`../benchmarks/`](../benchmarks/README.md). **Deep-fill caveat:** the `-cc` lanes' `max-num-seqs` is the *shallow* ceiling; concurrent **deep** streams cost rank-0 prefill working set, so the usable deep-concurrent count is lower than the shallow ceiling (see [`benchmarks/dcp4-cc200.md`](../benchmarks/dcp4-cc200.md) — always deep-fill a concurrency lane before trusting its width).
+Full per-lane numbers + reproduce commands: [`../benchmarks/`](../benchmarks/README.md).
 
-All lanes run the identical fork stack (image, b12x, MTP k=4, mesh-NCCL, `index_topk_pattern`, `clear_thinking`) — they differ **only** in `max-model-len` / `max-num-seqs` / cudagraph capture / DCP size. DCP shards the KV, so it's really one budget you spend on *context* (dcp4 → 655K single-stream) or *width* (dcp4-cc200 → multiple 200K streams).
+All lanes run the identical fork stack (image, b12x, MTP k=4, mesh-NCCL, `index_topk_pattern`, `clear_thinking`) — they differ **only** in `max-model-len` / `max-num-seqs` / `max-num-batched-tokens` / cudagraph capture / DCP size / **gpu-memory-utilization**. DCP shards the KV, so it's really one budget you spend on *context* (dcp4 → 655K single-stream) or *width* (dcp4-cc200 → multiple 200K streams).
+
+### Concurrency lanes: gmu, and the two deep-fill failure modes
+
+The `-cc` lanes carry two deliberate deltas from the single-stream lanes, both set per-lane in the `case`:
+
+- **`L_GMU=0.88`** (single-stream lanes use 0.89). Five concurrent *deep* prefills hold ~1 GiB more rank-0 working set than one stream; at 0.89 that breached the head's 1.5 GiB watchdog. `0.88` frees ~1.1 GiB/node and clears it (costs ~2% KV). Override at runtime with `GLM_GMU=…`.
+- **`L_BATCHED=2048`** (not 4096). Small prefill chunks *interleave* one stream's big prefill with everyone else's decode, so a user pasting a 50K doc dips the others instead of starving them.
+
+A concurrency lane's `max-num-seqs` is the *shallow* ceiling. **Always deep-fill it before trusting its width**, and read the failure by its signature:
+
+| symptom | cause | lever |
+|---|---|---|
+| head watchdog-kills **during prefill ramp**, KV usage still ~0% | rank-0 prefill working set (scales with streams × depth) | **lower `L_GMU`** (0.88 → 0.87…) — *not* `L_BATCHED`, *not* context |
+| **preemptions > 0** + per-stream t/s sags mid-decode | KV-pool capacity — resident set exceeds the pool | fewer / shorter streams (e.g. `dcp4-cc128`) |
+
+**Don't be scared off by a cold-fill TTFT.** Filling all streams to max depth *cold and simultaneously* (0% prefix cache) gives a pathological TTFT (tens of minutes for 5×197K) — that's a stress artifact, not the serving speed. Real multi-turn agents **amortize via prefix cache**: each turn only re-prefills its *delta* (new message + tool results), the resident history is a cache hit, so per-turn TTFT stays small. `clear_thinking=false` + `--enable-prefix-caching` (already in every lane) are what keep that prefix stable. Usable ceiling ≈ *streams whose combined resident KV fits the pool* (dcp4-cc200: ~5 × ≤197K ≈ 89% of its ~1.1M-token pool).
 
 ```bash
 GLM_LANE=dcp2 ./glm-serve.sh start        # 327K flagship

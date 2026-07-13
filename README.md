@@ -1,4 +1,4 @@
-# GLM-5.2 on 4× DGX Spark — pick your lane: 327K depth *or* multi-user throughput
+# GLM-5.2 (unpruned) on 4× DGX Spark — depth, max context, or multi-user
 
 **Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks — one recipe, one script, a lane for each job: **`dcp2`** for **327K single-user** depth (the flagship), **`dcp4`** for **655K max-context**, and **`-cc` concurrency lanes** for **multi-user serving**. TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware.**
 
@@ -114,7 +114,7 @@ Key serve flags for the dcp2 lane (full command in the script):
 --attention-backend B12X_MLA_SPARSE
 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1
 --max-model-len 327680 --max-num-seqs 1 --max-num-batched-tokens 2048
---gpu-memory-utilization 0.90 --kv-cache-dtype fp8_ds_mla
+--gpu-memory-utilization 0.89 --kv-cache-dtype fp8_ds_mla   # 0.88 on the -cc lanes
 --speculative-config '{"model":"<weights>","method":"mtp","quantization":"compressed-tensors","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
 --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}'
 --default-chat-template-kwargs '{"clear_thinking":false}'
@@ -133,6 +133,23 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
 - **`clear_thinking:false`** keeps prior turns' thinking in history so the
   prompt prefix stays stable across turns → prefix-cache hits instead of
   re-prefilling the whole conversation every message.
+
+### Multi-user: the `-cc` lanes
+
+Serving several agents at once? The `-cc` lanes trade per-stream context for width on the
+same fork stack — `dcp2-cc200` (3×200K), `dcp4-cc200` (up to 5×200K), `dcp4-cc128`
+(up to 8×128K). They auto-set a lower `gpu-memory-utilization` (**0.88**): concurrent
+*deep* prefills hold ~1 GiB more rank-0 working set than a single stream, which at 0.89
+breaches the memory watchdog.
+
+**Don't judge a concurrency lane by a cold-fill benchmark.** Filling every stream to max
+depth *cold and simultaneously* (0% prefix cache) produces a pathological TTFT — a stress
+artifact, not the serving speed. Real multi-turn agents amortize: each turn only re-prefills
+its *delta* (the resident history is a prefix-cache hit — that's what `clear_thinking:false`
+protects), so per-turn TTFT stays small as context grows. The usable envelope is "streams
+whose combined resident KV fits the pool" — `dcp4-cc200` holds ~5 × ≤197K (validated
+deep-fill memory-safe, preempt=0). Numbers + the per-lane failure-mode diagnostic:
+[scripts/README](scripts/README.md) · [benchmarks/](benchmarks/README.md).
 
 ## Gotchas (all learned the hard way)
 
