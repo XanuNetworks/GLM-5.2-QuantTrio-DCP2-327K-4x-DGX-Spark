@@ -20,17 +20,19 @@ The KV pool scales with DCP degree. At gmu 0.885: **DCP2 pool = 327K, DCP4 pool 
 
 Head margin here (~0.7 GiB) is more comfortable than `dcp4-cc128`'s (~0.3) — fewer concurrent prefills (3 vs 5) means less rank-0 working set, even though each is deeper.
 
-## Concurrency scaling (random, shallow — 512 in / 512 out)
+## Concurrency scaling (llama-benchy `tool-eval-bench --perf`, pp8000/tg512, 2026-07-13)
 
-Per-stream decode depends on concurrency, not per-stream context:
-
-| c | aggregate t/s | per-stream t/s |
+| c | per-stream decode t/s | prefill t/s |
 |---|---|---|
-| 1 | ~18 | ~20 |
-| 2 | ~30 | ~15 |
-| 3 | ~41 | ~14 |
+| 1 | 21.9 | 568 |
+| 2 | 22.4 | 551 |
+| 3 | 21.6 | 563 |
 
-TTFT stays flat (~1.3 s) across concurrency — real batching, not queueing.
+**Per-stream decode holds ~22 t/s all the way to c=3** — DCP4 batches these 3 streams with
+almost no per-stream penalty (aggregate ~65 t/s at c=3). TTFT grows with concurrency
+(prefills serialize), but once a stream is decoding it stays fast.
+
+Pool: **666,496 tokens** (3.33× at 200K → 3×200K=600K fits, preempt-free). Tool Eval Bench: **87/100 ★★★★**.
 
 ## Tuning it yourself
 

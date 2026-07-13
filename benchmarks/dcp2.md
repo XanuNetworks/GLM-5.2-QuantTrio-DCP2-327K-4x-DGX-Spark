@@ -6,28 +6,30 @@
 
 ## Decode throughput (single stream)
 
-| prompt type | tok/s | notes |
-|---|---|---|
-| coherent (real chat/code) | **~25** | MTP acceptance is higher on natural text |
-| random tokens (worst case) | ~23 | acceptance floor; synthetic |
-| coherent @ ~32K depth | ~20 | stays flat-ish to depth |
+Fresh healthy-cluster re-measure (2026-07-13, llama-benchy via `tool-eval-bench --perf`):
 
-Healthy-cluster decode measured at **22.9 tok/s** (random, cold) after clearing the
-node-.12 stuck-clock bug — see the "Is your decode slow?" section in the main README.
-Before the fix the same config read **15.6 tok/s** (one GPU wedged at 660 MHz gated all 4).
+| workload | tok/s | notes |
+|---|---|---|
+| coherent (real coding prompts) | **~24.5** | MTP acceptance is higher on natural text |
+| shallow (~16K ctx) | 23.2 | llama-benchy `tg` |
+| @ 32K context depth | **18.6** | ~20% off shallow — for flatter depth use `dcp4` (21.6 t/s at 120K) |
+
+The healthy-cluster number came after clearing a stuck-clock bug (one GPU wedged at
+660 MHz gated all four): the same config read **15.6 tok/s** before the cold-cycle fix.
+See "Is your decode slow?" in [docs/troubleshooting.md](../docs/troubleshooting.md).
 
 ## Prefill
 
 | metric | value |
 |---|---|
-| cold prefill throughput | ~720 tok/s (3-sample mean, novel prompts) |
+| cold prefill throughput | ~714 tok/s (16K novel ingest, llama-benchy) |
 
 Measure prefill with **novel** prompts — reusing a fixed seed lets prefix-caching
 serve a warm KV and reports fake-fast prefill.
 
 ## Tool calling
 
-Tool Eval Bench: **88 / 100** (★★★★) — GLM's `glm47` tool-call parser + `enable-auto-tool-choice`.
+Tool Eval Bench: **87 / 100** (★★★★) — GLM's `glm47` tool-call parser + `enable-auto-tool-choice`. Consistent 87–89 across all lanes (model/parser-level).
 
 ## How to reproduce
 

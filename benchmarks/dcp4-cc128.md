@@ -34,17 +34,22 @@ Measured pool size (DCP4, seqs=5) at three gmu values — vLLM reports it at boo
 Verified against the watchdog log (`/tmp/glm-memwatch.log`), not the mem sampler — the
 sampler misses the fast trough (at 0.89 the head fell 3.03→1.16 in ~50 s between samples).
 
-## Concurrency scaling (random, shallow — 512 in / 512 out)
+## Concurrency scaling (llama-benchy `tool-eval-bench --perf`, pp8000/tg512, 2026-07-13)
 
-From the `seqs=8` sweep (per-stream decode depends on concurrency, not the seq ceiling):
-
-| c | aggregate t/s | per-stream t/s |
+| c | per-stream decode t/s | prefill t/s |
 |---|---|---|
-| 1 | 23.8 | 25.3 |
-| 4 | 43.5 | 11.6 |
-| 5 | ~47 | ~10.5 |
+| 1 | 23.3 | 571 |
+| 2 | 20.8 | 568 |
+| 3 | 22.5 | 568 |
+| 4 | 22.3 | 566 |
+| 5 | 22.7 | 566 |
 
-More agents, each slower — a throughput/latency trade, not free capacity.
+**Per-stream decode holds ~22 t/s all the way to c=5** — the `seqs=5` config batches its 5
+streams with almost no per-stream penalty (aggregate ~113 t/s at c=5). TTFT grows with
+concurrency (prefills serialize), but each stream decodes fast once started. The widest
+lane: most simultaneous agents, each still ~22 t/s.
+
+Pool: **650,752 tokens** (4.96× at 131K → 5×128K=640K fits). Tool Eval Bench: **89/100 ★★★★**.
 
 ## Why DCP4 (and not DCP2)
 

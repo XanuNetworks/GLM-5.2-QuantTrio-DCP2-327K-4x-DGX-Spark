@@ -31,32 +31,32 @@ All four run the identical fork stack — they differ only in how the one KV bud
 ### What you get
 
 - 🧠 **Full model, no pruning** — all 256 experts on 4 nodes, from 128K per stream up to 655K single-user context depending on lane.
-- 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
+- 📏 **Holds to depth** — `dcp4` keeps ~90% of its shallow decode even at **120K context** (21.6 t/s, DCP4's attention sharding); the 327K flagship holds ~80% at 32K.
 - 🔁 **One recipe, four lanes** — the same fork stack serves single-user *depth* (`dcp2`/`dcp4`) or multi-user *width* (the `-cc` lanes); switch with one env var (see the table above). Each lane is tuned so its streams fit the KV pool with no preemption.
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
 
-Single-stream (matches llama-benchy methodology), all four GPUs at full clock:
+Flagship `dcp2`, single-stream, all four GPUs at full clock (llama-benchy via `tool-eval-bench`, healthy-cluster re-measure 2026-07-13):
 
 | workload | tok/s |
 |---|---|
-| **Decode — coherent (real agentic coding/reasoning, mean of 5)** | **~25** (21–29) |
-| Decode — random-token floor (`tg512`, worst case) | ~23 |
-| Decode — @ 32K context depth | ~20 |
-| Prefill (cold, ~12–17K-token ingest) | ~720 |
+| **Decode — coherent (real coding prompts)** | **~24.5** |
+| Decode — shallow (~16K ctx) | 23.2 |
+| Decode — @ 32K context depth | 18.6 |
+| Prefill (cold, ~16K ingest) | ~714 |
 
-Matches CosmicRaisins' reference (~28 agentic). MTP **k=4**, mean acceptance length ~3.0. Single-stream (`max-num-seqs 1`) — this is a one-user, max-speed config, not a concurrent-serving one. Reproduce this table with **`utils/benchmark.sh`** (coherent + random floor + cold prefill).
+MTP **k=4**. Single-stream (`max-num-seqs 1`) — one-user, max-speed, not a concurrent-serving config. The **`dcp4`** lane actually holds decode *flatter* to depth (21.6 t/s even at 120K — see [benchmarks/](benchmarks/README.md)). Reproduce with `tool-eval-bench --perf` or **`utils/benchmark.sh`**.
 
-> 📏 **Prose beats random by ~10-15%.** Random-token benches (`--dataset-name random`) tank MTP acceptance — real coherent prompts generate predictable, structured output the draft head accepts far more often, so `tg512`-on-random *understates* real-world decode. The **~25 coherent** figure is what you'll actually see; the ~23 is a pessimistic floor. (Watch out for prefix-cache pollution too — repeated random prompts at a fixed seed cache-hit and report fake-fast prefill.)
+> 📏 **Prose beats random by ~10-15%.** Random-token benches (`--dataset-name random`) tank MTP acceptance — real coherent prompts generate predictable, structured output the draft head accepts far more often, so `tg512`-on-random *understates* real-world decode. The **~24.5 coherent** figure is what you'll actually see; the ~21 random floor is pessimistic. (Watch out for prefix-cache pollution too — repeated random prompts at a fixed seed cache-hit and report fake-fast prefill.)
 
-> 🕵️ **How we got from ~15 → ~25:** it wasn't cutlass, the driver, or NCCL (we suspected all three). One node's GPU was silently wedged at a **quarter of its clock speed**, and in a synchronized TP cluster the slowest GPU gates all four. If your numbers come in low, read [Is your decode slow?](docs/troubleshooting.md#is-your-decode-slow) before you blame the stack.
+> 🕵️ **How we got from ~15 → ~24:** it wasn't cutlass, the driver, or NCCL (we suspected all three). One node's GPU was silently wedged at a **quarter of its clock speed**, and in a synchronized TP cluster the slowest GPU gates all four. If your numbers come in low, read [Is your decode slow?](docs/troubleshooting.md#is-your-decode-slow) before you blame the stack.
 
 ### Tool calling
 
 Scored with [Tool Eval Bench](https://github.com/SeraphimSerapis/tool-eval-bench) — 69 scenarios, 14 categories:
 
-**88 / 100 → ★★★★ Good** · 54 pass / 13 partial / 2 fail · **zero safety warnings**.
+**87 / 100 → ★★★★ Good** · **zero safety warnings** · consistent **87–89 across all four lanes** (tool-calling is model/parser-level, so it's the same regardless of context/concurrency config).
 
 Perfect (100%) on the fundamentals — Tool Selection, Parameter Precision, Restraint & Refusal, Error Recovery, Structured Reasoning, Code Patterns, Autonomous Planning. It softens only on the hard agentic edges: **Toolset Scale** 62% (disambiguating among many offered tools), nested **Structured Output** 75%, and long-horizon **Context & State** 75%. A "senior engineer" shape — rock-solid core, honest about the corners.
 

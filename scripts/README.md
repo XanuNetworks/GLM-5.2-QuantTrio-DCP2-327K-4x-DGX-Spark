@@ -71,7 +71,7 @@ It comes down to one tension — and two of the knobs you'd *expect* to matter t
 Each lane's defaults are already tuned; **if in doubt, pick a lane and run it as-is.** The overrides below are only for when you've looked at [`../benchmarks/`](../benchmarks/README.md) and want a different point on the curve for your workload (many shallow agents vs. a few deep ones).
 
 > ⚠️ **Two costs to know before you turn a knob up:**
-> - **Higher concurrency → slower per-stream decode.** It's a throughput/latency trade, not free capacity. E.g. `dcp4-cc128`: c=1 gives ~25 tok/s/stream, c=5 gives ~10.5. More agents, each slower.
+> - **Higher concurrency → slower per-stream decode.** It's a throughput/latency trade, not free capacity. E.g. `dcp4-cc128`: c=1 and c=5 both hold ~22 tok/s/stream (DCP4 batches well; aggregate scales ~linearly). More agents, each slower.
 > - **Higher context / bigger prefill → much longer TTFT.** Loading a deep prompt cold is `O(n²)` attention; a fresh 197K prompt is *minutes* of time-to-first-token, and several deep prompts arriving cold at once multiply that (they share one prefill budget). Steady multi-turn use hides this via prefix cache — a *cold* deep load does not.
 
 Set these env vars at launch to override the lane without touching the file:

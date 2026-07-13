@@ -6,13 +6,19 @@
 
 ## Decode throughput (single stream)
 
-| prompt type | tok/s | notes |
-|---|---|---|
-| coherent | **~24** | only ~15% slower than dcp2's 327K despite 2× the context |
-| random tokens | ~19 | acceptance floor |
+Fresh re-measure (2026-07-13, llama-benchy via `tool-eval-bench --perf`):
 
-DCP4's finer attention-sharding offsets the extra cross-rank comm at long context, so
-the decode cost of doubling max context (327K → 655K) is small.
+| context depth | decode t/s | prefill t/s |
+|---|---|---|
+| ~16K | **24.0** | 559 |
+| 32K | 23.2 | 551 |
+| 120K | **21.6** | 542 |
+
+**This lane holds decode to depth better than the flagship** — only ~10% off shallow even
+at **120K context** (dcp2 drops ~20% by 32K). DCP4's 4-way attention sharding offsets the
+extra cross-rank comm at long context, so decode barely degrades as the context grows.
+
+Pool: **707,584 tokens** (1.08× at 655K → one full 655K stream). Tool Eval Bench: **87/100 ★★★★**.
 
 ## Memory
 
