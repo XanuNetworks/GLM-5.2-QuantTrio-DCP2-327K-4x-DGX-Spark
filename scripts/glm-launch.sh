@@ -324,12 +324,14 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice
     --enable-prefix-caching
     --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}'
-    # k=3, not the recipe's k=4: CosmicRaisins revealed (thread tail, Jul 7)
-    # his PRODUCTION runs k=3 and the repo's k=4 default was a mistake — his
-    # measured ~22 tables are k=3. Our own per-position acceptance showed the
-    # 4th draft token accepted ~0% of the time (0.88/0.46/0.18/0.00): k=4 runs
-    # a full extra draft pass per step for a token it never keeps.
-    --speculative-config '{"model":"/cache/huggingface/hub/glm52-int4-int8mix","method":"mtp","quantization":"compressed-tensors","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
+    # k=4 (matches CosmicRaisins' recipe + the ~25 coherent bench). On random
+    # tokens k=3/k=4 are a wash, but on real coherent prompts the 4th draft
+    # token accepts often enough to help. draft_tensor_parallel_size is LOCKED
+    # at the target TP (=4) under DCP2 — vLLM requires it be 1 or target-TP AND
+    # divisible by dcp_size=2, so 4 is the only legal value ("draft tp=1" is a
+    # non-DCP trick). NOTE: needs the PR#72 draft-under-DCP patches (in Stack) or
+    # k>1 acceptance collapses under DCP.
+    --speculative-config '{"model":"/cache/huggingface/hub/glm52-int4-int8mix","method":"mtp","quantization":"compressed-tensors","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
     # clear_thinking=false (CosmicRaisins, thread tail): GLM's template strips
     # prior turns' thinking by default, mutating the prefix every turn → full
     # conversation re-prefill per message. Keeping thinking stabilizes the

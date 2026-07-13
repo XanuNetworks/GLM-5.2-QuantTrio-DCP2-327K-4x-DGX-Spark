@@ -4,13 +4,14 @@
 
 ![context](https://img.shields.io/badge/context-327K-1f6feb)
 ![hardware](https://img.shields.io/badge/hardware-4×_DGX_Spark_(GB10)-76b900)
-![decode](https://img.shields.io/badge/decode-~23_tok%2Fs-brightgreen)
-![prefill](https://img.shields.io/badge/prefill-~365_tok%2Fs-blue)
+![decode](https://img.shields.io/badge/decode-~25_tok%2Fs_coherent-brightgreen)
+![prefill](https://img.shields.io/badge/prefill-~720_tok%2Fs-blue)
+![tool--calling](https://img.shields.io/badge/tool--calling-88%2F100_★★★★-brightgreen)
 ![driver](https://img.shields.io/badge/driver-580.159.03-brightgreen)
 ![cutlass](https://img.shields.io/badge/cutlass--dsl-4.6.0-blue)
 ![license](https://img.shields.io/badge/license-Apache_2.0-lightgrey)
 
-A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://github.com/CosmicRaisins/glm-5.2-gb10), running a **deliberately newer stack than the reference recipes were written against** — the *current* DGX Spark firmware (driver **580.159.03**) with **cutlass-dsl 4.6.0**, **FlashInfer 0.6.15**, and **torch 2.11.0**. Same unpruned model, same 327K context, same **~23 tok/s** decode as the reference cluster — just on the firmware everyone else hasn't updated to yet (with the one landmine it hides, defused below).
+A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://github.com/CosmicRaisins/glm-5.2-gb10), running a **deliberately newer stack than the reference recipes were written against** — the *current* DGX Spark firmware (driver **580.159.03**) with **cutlass-dsl 4.6.0**, **FlashInfer 0.6.15**, and **torch 2.11.0**. Same unpruned model, same 327K context, **~25 tok/s** coherent decode matching the reference cluster — just on the firmware everyone else hasn't updated to yet (with the one landmine it hides, defused below).
 
 > [!WARNING]
 > **Taking the firmware update? Do this first.** On driver 580.159.03, b12x kernels won't compile under `nvidia-cutlass-dsl==4.5.2` (`ValueError: Operation creation failed`) — the version pre-firmware recipes implicitly use. Pin **≥ 4.5.3** (we run 4.6.0). See [Stack](#stack--build).
@@ -24,16 +25,28 @@ A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://gi
 
 ### Benchmarks
 
-Single-stream `tg512` (`vllm bench serve`), all four GPUs at full clock:
+Single-stream (matches llama-benchy methodology), all four GPUs at full clock:
 
-| | t/s |
+| workload | tok/s |
 |---|---|
-| **decode (tg512)** | **~23** |
-| prefill (pp2048) | ~365 |
+| **Decode — coherent (real agentic coding/reasoning, mean of 5)** | **~25** (21–29) |
+| Decode — random-token floor (`tg512`, worst case) | ~23 |
+| Decode — @ 32K context depth | ~20 |
+| Prefill (cold, ~12–17K-token ingest) | ~720 |
 
-Matches CosmicRaisins' reference cluster — flat to depth, MTP acceptance ~56% (mean accepted length ~2.8). Prefill is chunk-limited by a deliberate memory trade ([Gotcha 2](#gotchas-all-learned-the-hard-way)).
+Matches CosmicRaisins' reference (~28 agentic). MTP **k=4**, mean acceptance length ~3.0. Single-stream (`max-num-seqs 1`) — this is a one-user, max-speed config, not a concurrent-serving one.
 
-> 🕵️ **How we got from ~15 → ~23:** it wasn't cutlass, the driver, or NCCL (we suspected all three). One node's GPU was silently wedged at a **quarter of its clock speed**, and in a synchronized TP cluster the slowest GPU gates all four. If your numbers come in low, read [Is your decode slow?](#is-your-decode-slow) before you blame the stack.
+> 📏 **Prose beats random by ~10-15%.** Random-token benches (`--dataset-name random`) tank MTP acceptance — real coherent prompts generate predictable, structured output the draft head accepts far more often, so `tg512`-on-random *understates* real-world decode. The **~25 coherent** figure is what you'll actually see; the ~23 is a pessimistic floor. (Watch out for prefix-cache pollution too — repeated random prompts at a fixed seed cache-hit and report fake-fast prefill.)
+
+> 🕵️ **How we got from ~15 → ~25:** it wasn't cutlass, the driver, or NCCL (we suspected all three). One node's GPU was silently wedged at a **quarter of its clock speed**, and in a synchronized TP cluster the slowest GPU gates all four. If your numbers come in low, read [Is your decode slow?](#is-your-decode-slow) before you blame the stack.
+
+### Tool calling
+
+Scored with [Tool Eval Bench](https://github.com/SeraphimSerapis/tool-eval-bench) — 69 scenarios, 14 categories:
+
+**88 / 100 → ★★★★ Good** · 54 pass / 13 partial / 2 fail · **zero safety warnings**.
+
+Perfect (100%) on the fundamentals — Tool Selection, Parameter Precision, Restraint & Refusal, Error Recovery, Structured Reasoning, Code Patterns, Autonomous Planning. It softens only on the hard agentic edges: **Toolset Scale** 62% (disambiguating among many offered tools), nested **Structured Output** 75%, and long-horizon **Context & State** 75%. A "senior engineer" shape — rock-solid core, honest about the corners.
 
 ## Stack & build
 
@@ -99,7 +112,7 @@ Key serve flags for the dcp2 lane (full command in the script):
 --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1
 --max-model-len 327680 --max-num-seqs 1 --max-num-batched-tokens 2048
 --gpu-memory-utilization 0.90 --kv-cache-dtype fp8_ds_mla
---speculative-config '{"model":"<weights>","method":"mtp","quantization":"compressed-tensors","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}'
+--speculative-config '{"model":"<weights>","method":"mtp","quantization":"compressed-tensors","draft_attention_backend":"B12X_MLA_SPARSE","num_speculative_tokens":4,"draft_sample_method":"probabilistic"}'
 --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}'
 --default-chat-template-kwargs '{"clear_thinking":false}'
 --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
@@ -144,9 +157,11 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
 4. **Do not run periodic drop_caches during weight load** (it starves
    read-ahead and can stall a rank into the 1800 s Gloo timeout, collapsing
    the cluster). One drop before launch is right.
-5. **MTP k=3 vs k=4 is a wash** — we A/B'd on identical benchmarks: identical
-   mean throughput, k=3 gets higher acceptance rate, k=4 slightly higher burst
-   peaks. We run k=3 (matches CosmicRaisins' production).
+5. **MTP k=4** (CosmicRaisins' recipe value). On *random-token* benches k=3/k=4
+   are a wash — but on real coherent prompts the 4th draft token accepts often
+   enough to help, so k=4 wins where it matters. Requires the PR#72 draft-under-
+   DCP patches (see Stack) or k>1 acceptance collapses under DCP. `draft_tp` is
+   locked at the target TP (=4) under DCP2 — "draft tp=1" is a non-DCP trick.
 6. **`docker commit --change 'ENTRYPOINT ...'` quoting**: `\"` inside the
    change value silently produces a broken `/bin/sh -c` entrypoint. Verify
    with `docker inspect --format '{{.Config.Entrypoint}}'` after committing.
