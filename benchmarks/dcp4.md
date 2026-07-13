@@ -35,4 +35,4 @@ curl -s http://<HEAD>:8000/v1/models   # confirm "max_model_len": 655360
 
 - Serves at `max_model_len 655360` — verified end-to-end.
 - This is a **single-stream** lane (c=1). For concurrency on the DCP4 budget, use
-  `dcp4-cc200` / `dcp4-cc128`, which trade per-stream context for parallel streams.
+  `dcp4-cc128`, which trades per-stream context for parallel streams.

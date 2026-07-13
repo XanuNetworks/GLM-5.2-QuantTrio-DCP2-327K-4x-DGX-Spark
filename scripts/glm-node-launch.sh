@@ -71,19 +71,17 @@ KERNELS_DIR="$HOME/glm-triton"
 # Naming: <dcp-size>[-cc<per-stream-K>]. Bare = single-stream (c=1); -ccNNN =
 # multi-user, NNN K per stream. DCP is one KV budget spent on depth OR width:
 #   dcp2        — 327K ctx, c=1, DCP2  → flagship (~25 t/s coherent)
-#   dcp2-cc200  — 200K ctx, c=3, DCP2  → multi-user (~40 t/s aggregate, ~14 each)
+#   dcp4-cc200  — 200K ctx, c=3, DCP4  → multi-user (3x200K=600K fits the 651K pool @ gmu 0.885)
 #   dcp4        — 655K ctx, c=1, DCP4  → max-context specialty (~24 t/s coherent)
-#   dcp4-cc200  — 200K ctx, c=5, DCP4  → multi-user wide (~47 t/s aggregate, ~10 each)
-#   dcp4-cc128  — 128K ctx, c=8, DCP4  → max-width (DCP4's pool spread over 8 streams)
+#   dcp4-cc128  — 128K ctx, c=5, DCP4  → multi-user (5x128K=640K fits the 651K pool @ gmu 0.885)
 # ---------------------------------------------------------------------------
 GLM_LANE="${GLM_LANE:-dcp2}"
 case "$GLM_LANE" in
   dcp2)       L_MAXLEN=327680; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10; L_DCP=2 ;;
-  dcp2-cc200) L_MAXLEN=200000; L_SEQS=3; L_BATCHED=4096; L_CAPTURE=16; L_DCP=2 ;;
+  dcp4-cc200) L_MAXLEN=200000; L_SEQS=3; L_BATCHED=2048; L_CAPTURE=16; L_DCP=4; L_GMU=0.885 ;;  # 3x200K on DCP4. DCP2 can't fit 3x200K=600K (its pool is 327K); DCP4's ~651K pool does (3.25x@200K). gmu 0.885, capture 16 covers 3*(1+4)=15. Validated: head floor ~2.2GiB, preempt=0.
   dcp4)       L_MAXLEN=655360; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10; L_DCP=4 ;;
-  dcp4-cc200) L_MAXLEN=200000; L_SEQS=5; L_BATCHED=2048; L_CAPTURE=32; L_DCP=4; L_GMU=0.88 ;;  # gmu 0.88: 5 concurrent DEEP prefills need +1.1GiB head headroom (0.89 watchdog-killed). batched 2048 interleaves prefill/decode fairly. Validated: 5x197K preempt=0, head floor 2.07GiB.
-  dcp4-cc128) L_MAXLEN=131072; L_SEQS=8; L_BATCHED=2048; L_CAPTURE=48; L_DCP=4; L_GMU=0.88 ;;  # gmu 0.88 too (8 streams). Not yet deep-fill validated.
-  *) echo "GLM_LANE must be dcp2 (327K,c=1), dcp2-cc200 (200K,c=3), dcp4 (655K,c=1), dcp4-cc200 (200K,c=5), or dcp4-cc128 (128K,c=8); got '$GLM_LANE'" >&2; exit 1 ;;
+  dcp4-cc128) L_MAXLEN=131072; L_SEQS=5; L_BATCHED=2048; L_CAPTURE=32; L_DCP=4; L_GMU=0.885 ;;  # 5x128K on DCP4. gmu 0.885 tuned so the 651K pool fits 5x128K=640K (PREEMPT-FREE) and the head survives 5 cold deep prefills (~1.8G floor, no watchdog kill). capture 32 covers 5*(1+4)=25 decode batch. Validated 07-13: 5/5, preempt=0, no kill. GLM_SEQS is a default, not a cap.
+  *) echo "GLM_LANE must be dcp2 (327K,c=1), dcp4 (655K,c=1), dcp4-cc200 (200K,c=3), or dcp4-cc128 (128K,c=5); got '$GLM_LANE'" >&2; exit 1 ;;
 esac
 # ============================================================================
 
@@ -254,12 +252,17 @@ if true; then  # every lane runs the fork stack (the top-of-file case validated 
     # deep-prefill activation transient. -cc lanes: small chunks INTERLEAVE one
     # stream's big prefill with the others' decode (a 50K paste dips them, doesn't
     # starve them). NB it does NOT bound concurrent-prefill working set — gmu does.
-    --max-model-len ${L_MAXLEN} --max-num-seqs ${L_SEQS} --max-num-batched-tokens ${L_BATCHED}
+    # max-num-seqs = the lane's concurrency ceiling. Runtime override: GLM_SEQS=N
+    # (e.g. GLM_LANE=dcp4-cc128 GLM_SEQS=5 for a bigger KV pool — fewer seqs reserve
+    # less, so the pool grows). Pick N from benchmarks/ for your workload. NB raising
+    # it well above the lane default may want a higher L_CAPTURE too (else big decode
+    # batches fall back to eager — slower, not a crash).
+    --max-model-len ${L_MAXLEN} --max-num-seqs ${GLM_SEQS:-${L_SEQS}} --max-num-batched-tokens ${L_BATCHED}
     # gpu-memory-utilization is PER-LANE (L_GMU): 0.89 single-stream, 0.88 for the
     # -cc lanes. 5 concurrent DEEP prefills hold ~1G more rank-0 working set than a
     # single stream and breached the ~1.5G head watchdog at 0.89; -0.01 gmu ≈ +1.1G
     # floor/node (KV pool auto-resizes, loses ~2%). Runtime override: GLM_GMU=…
-    # Validated dcp4-cc200 cold 5x197K: preempt=0, head floor 2.07 GiB.
+    # Validated dcp4-cc128 cold 5x128K @ 0.885: preempt=0, head floor ~1.8 GiB, 5/5.
     --gpu-memory-utilization ${GLM_GMU:-${L_GMU:-0.89}} --kv-cache-dtype fp8_ds_mla
     --async-scheduling
     --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":'"${L_CAPTURE}"'}'

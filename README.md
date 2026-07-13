@@ -1,9 +1,9 @@
 # GLM-5.2 (unpruned) on 4× DGX Spark — depth, max context, or multi-user
 
-**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks. One recipe, one script, three jobs — pick a lane with `GLM_LANE`: **depth** (`dcp2` — 327K single-user, the flagship), **max context** (`dcp4` — 655K single-user), or **multi-user** (the `-cc` lanes — up to 8 concurrent agents). All five lanes share the same stack: TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware. Trade the one KV budget for depth *or* width — that's the whole idea.**
+**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks. One recipe, one script, three jobs — pick a lane with `GLM_LANE`: **depth** (`dcp2` — 327K single-user, the flagship), **max context** (`dcp4` — 655K single-user), or **multi-user** (the `-cc` lanes — up to 5 concurrent agents). All four lanes share the same stack: TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware. Trade the one KV budget for depth *or* width — that's the whole idea.**
 
 ![context](https://img.shields.io/badge/context-up_to_655K-1f6feb)
-![concurrency](https://img.shields.io/badge/multi--user-up_to_8_agents-1f6feb)
+![concurrency](https://img.shields.io/badge/multi--user-up_to_5_agents-1f6feb)
 ![hardware](https://img.shields.io/badge/hardware-4×_DGX_Spark_(GB10)-76b900)
 ![decode](https://img.shields.io/badge/decode-~25_tok%2Fs_coherent-brightgreen)
 ![prefill](https://img.shields.io/badge/prefill-~720_tok%2Fs-blue)
@@ -21,7 +21,7 @@ A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://gi
 
 - 🧠 **Full model, no pruning** — all 256 experts on 4 nodes, from 128K per stream up to 655K single-user context depending on lane.
 - 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
-- 🔁 **Three jobs, one script** — **depth** (`dcp2`: 327K single-user, ~25 tok/s coherent — flagship), **max context** (`dcp4`: 655K single-user, ~24 coherent), or **multi-user** (`-cc` lanes: up to 8 concurrent agents; `dcp2-cc200` does ~41 t/s aggregate at c=3). One KV budget spent on depth *or* width. Pick with `GLM_LANE`. (Lane map: [scripts/README](scripts/README.md) · per-lane numbers: [benchmarks/](benchmarks/README.md).)
+- 🔁 **Three jobs, one script** — **depth** (`dcp2`: 327K single-user, ~25 tok/s coherent — flagship), **max context** (`dcp4`: 655K single-user, ~24 coherent), or **multi-user** (`-cc` lanes: `dcp4-cc200` = 3×200K, `dcp4-cc128` = 5×128K, both on DCP4, tuned to fit the pool). One KV budget spent on depth *or* width. Pick with `GLM_LANE`. (Lane map: [scripts/README](scripts/README.md) · per-lane numbers: [benchmarks/](benchmarks/README.md).)
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
@@ -39,7 +39,7 @@ Matches CosmicRaisins' reference (~28 agentic). MTP **k=4**, mean acceptance len
 
 > 📏 **Prose beats random by ~10-15%.** Random-token benches (`--dataset-name random`) tank MTP acceptance — real coherent prompts generate predictable, structured output the draft head accepts far more often, so `tg512`-on-random *understates* real-world decode. The **~25 coherent** figure is what you'll actually see; the ~23 is a pessimistic floor. (Watch out for prefix-cache pollution too — repeated random prompts at a fixed seed cache-hit and report fake-fast prefill.)
 
-> 🕵️ **How we got from ~15 → ~25:** it wasn't cutlass, the driver, or NCCL (we suspected all three). One node's GPU was silently wedged at a **quarter of its clock speed**, and in a synchronized TP cluster the slowest GPU gates all four. If your numbers come in low, read [Is your decode slow?](#is-your-decode-slow) before you blame the stack.
+> 🕵️ **How we got from ~15 → ~25:** it wasn't cutlass, the driver, or NCCL (we suspected all three). One node's GPU was silently wedged at a **quarter of its clock speed**, and in a synchronized TP cluster the slowest GPU gates all four. If your numbers come in low, read [Is your decode slow?](docs/troubleshooting.md#is-your-decode-slow) before you blame the stack.
 
 ### Tool calling
 
@@ -103,10 +103,9 @@ CONFIG block (node IPs, user). Lanes via `GLM_LANE`:
 
 ```bash
 ./glm-serve.sh start                        # default lane = dcp2: 327K, single-user, max-speed
-GLM_LANE=dcp2-cc200 ./glm-serve.sh start    # multi-user on DCP2: 200K, c=3, ~41 t/s aggregate
+GLM_LANE=dcp4-cc200 ./glm-serve.sh start    # multi-user on DCP4: 3×200K, tuned to fit the pool
 GLM_LANE=dcp4 ./glm-serve.sh start          # max context: 655K, single-user (~24 t/s coherent)
-GLM_LANE=dcp4-cc200 ./glm-serve.sh start    # wide multi-user on DCP4: 200K, up to c=5
-# GLM_LANE=dcp4-cc128 — 128K, up to c=8 (widest; see scripts/README + benchmarks/)
+GLM_LANE=dcp4-cc128 ./glm-serve.sh start    # multi-user on DCP4: 5×128K, tuned to fit the pool
 ```
 
 Key serve flags for the dcp2 lane (full command in the script):
@@ -138,56 +137,33 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
 ### Multi-user: the `-cc` lanes
 
 Serving several agents at once? The `-cc` lanes trade per-stream context for width on the
-same fork stack — `dcp2-cc200` (3×200K), `dcp4-cc200` (up to 5×200K), `dcp4-cc128`
-(up to 8×128K). They auto-set a lower `gpu-memory-utilization` (**0.88**): concurrent
-*deep* prefills hold ~1 GiB more rank-0 working set than a single stream, which at 0.89
-breaches the memory watchdog.
+same fork stack — **`dcp4-cc200`** (3×200K) and **`dcp4-cc128`** (5×128K), both on DCP4. Each
+is tuned (via `gpu-memory-utilization`) so its advertised streams fit the KV pool with **no
+preemption**, while the rank-0 memory stays above the watchdog even under a burst of cold
+prefills. `dcp4-cc128` uses gmu **0.885** — the deliberate sweet spot where the 651K pool
+just fits 5×128K=640K *and* the head survives (0.89 fits the pool but kills the head; 0.88 is
+head-safe but leaves the pool ~5% short).
 
 **Don't judge a concurrency lane by a cold-fill benchmark.** Filling every stream to max
 depth *cold and simultaneously* (0% prefix cache) produces a pathological TTFT — a stress
 artifact, not the serving speed. Real multi-turn agents amortize: each turn only re-prefills
 its *delta* (the resident history is a prefix-cache hit — that's what `clear_thinking:false`
-protects), so per-turn TTFT stays small as context grows. The usable envelope is "streams
-whose combined resident KV fits the pool" — `dcp4-cc200` holds ~5 × ≤197K (validated
-deep-fill memory-safe, preempt=0). Numbers + the per-lane failure-mode diagnostic:
+protects), so per-turn TTFT stays small as context grows.
+
+**Concurrency is a tunable default, not a cap.** `GLM_SEQS` raises or lowers a lane's stream
+count for your workload — there's no enforced maximum. Raising it is usually safe: real
+traffic rarely has every stream at full context at once, so the pool usually isn't exhausted,
+and if it is you get **graceful preemption** (a re-prefill stall on one stream), not a crash.
+The one hard edge to respect: a burst of many *cold deep* prefills at a high `GLM_SEQS` can
+breach the head watchdog (a container restart) — which is exactly the boundary each lane's
+default is tuned to sit below. Numbers + the per-lane tuning guide:
 [scripts/README](scripts/README.md) · [benchmarks/](benchmarks/README.md).
 
-## Gotchas (all learned the hard way)
+## Troubleshooting & gotchas
 
-> The optional unified-memory watchdog lives in [`utils/`](utils/README.md#glm-memwatchsh) now — it's insurance infra, not part of the core recipe.
+Slow decode, a failed boot, or a fabric issue? The hard-won stuff — the **stuck-GPU-clock** check (the #1 cause of slow decode), the head-node memory-floor tuning, per-node bind-mount traps, MTP-under-DCP notes, and RoCE — lives in **[docs/troubleshooting.md](docs/troubleshooting.md)**.
 
-1. **`--max-num-batched-tokens 2048` (recipe: 4096) and `gmu 0.89` (recipe:
-   0.90).** Deep prefills (150K+) and long tg benches transiently need more
-   activation headroom than the head node has; 4096 chunks and gmu 0.90 both
-   drove the head node's MemAvailable down near/through the ~1.5 GiB floor
-   (a failed boot/bench). Halving the chunk halves the prefill transient
-   (cost: prefill rate); gmu 0.89 buys ~1.1 GiB more permanent floor per node
-   (cost: ~2% KV pool). If your nodes run leaner, try the recipe's values first.
-2. **RoCE GID index can differ per node** (ours did pre-firmware: 3/3/4/4).
-   `scripts/glm-container-entrypoint.sh` is bind-mounted and auto-detects the RoCEv2
-   IPv4 GID at container start instead of hardcoding `NCCL_IB_GID_INDEX`.
-3. **Do not run periodic drop_caches during weight load** (it starves
-   read-ahead and can stall a rank into the 1800 s Gloo timeout, collapsing
-   the cluster). One drop before launch is right.
-4. **MTP k=4** (CosmicRaisins' recipe value). On *random-token* benches k=3/k=4
-   are a wash — but on real coherent prompts the 4th draft token accepts often
-   enough to help, so k=4 wins where it matters. Requires the PR#72 draft-under-
-   DCP patches (see Stack) or k>1 acceptance collapses under DCP. `draft_tp` is
-   locked at the target TP (=4) under DCP2 — "draft tp=1" is a non-DCP trick.
-5. **Per-node bind-mounts must exist on every node.** The entrypoint is
-   bind-mounted from each node's `$HOME/vllm/`; if it's missing on a worker,
-   Docker silently creates an empty *directory* there and the container exits 126.
-   Stage `glm-container-entrypoint.sh` (and `glm-memwatch.sh`) to **all** nodes.
-6. **`docker commit --change 'ENTRYPOINT ...'` quoting**: `\"` inside the
-   change value silently produces a broken `/bin/sh -c` entrypoint. Verify
-   with `docker inspect --format '{{.Config.Entrypoint}}'` after committing.
-
-## Is your decode slow?
-
-Check the boring stuff before blaming the stack. (We blamed the stack for a while. It wasn't the stack.)
-
-- 🐌 **A GPU stuck at low clock — this is the big one.** A GB10 can silently wedge a single GPU at ~660 MHz: it *reports* `P0` but delivers a quarter-clock, stays cold, and draws ~17 W even under full load. In a synchronized TP cluster **the slowest GPU gates all four**, so one lame node quietly capped us at ~15 t/s for an entire session. Burn each GPU for 5 s and read `nvidia-smi --query-gpu=clocks.current.sm,power.draw` — healthy ≈ **2300–2500 MHz / ~90 W**, wedged ≈ **660 MHz / ~17 W**. A **warm reboot won't fix it** (the GPU firmware holds the wedge on standby power); you need a full **cold power cycle** — shut down, *pull the plug for ~30 s*, power back on. `glm-serve.sh` burn-checks every node in preflight and refuses to launch on a wedged one — or run it on demand: **`utils/check-clocks.sh`**.
-- 🌐 **Then the fabric.** Slow or lossy prefill → [Lossless RoCE](docs/lossless-roce.md), and remember the switch QoS does nothing without node-side `NCCL_IB_TC`. Confirm NCCL is on RDMA verbs, not TCP.
+The one-line version: **if decode is slow, burn-check the GPU clocks (`utils/check-clocks.sh`) before blaming the stack** — a single GB10 wedged at a quarter-clock silently gates the whole TP cluster, and only a cold power cycle clears it.
 
 ## Credits
 

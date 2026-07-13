@@ -36,35 +36,57 @@ Naming: `<dcp-size>[-cc<per-stream-K>]`. Bare = single-stream (c=1); `-ccNNN` = 
 | `GLM_LANE` | ctx | concurrency | measured | role |
 |---|---|---|---|---|
 | **`dcp2`** (default) | 327K | c=1 | ~25 t/s coherent | 🏆 flagship — single-user, max depth + speed |
-| **`dcp2-cc200`** | 200K | c=3 | ~41 t/s aggregate · ~14 each · TTFT ~1.3 s | multi-user on DCP2 |
+| **`dcp4-cc200`** | 200K | c=3 | 3×200K=600K fits the 651K pool preempt-free · head-safe · gmu 0.885 | multi-user on DCP4 |
 | **`dcp4`** | 655K | c=1 | ~24 t/s coherent | max-context specialty (DCP4's 4× KV) |
-| **`dcp4-cc200`** | 200K | up to c=5 | ~47 t/s aggregate · ~10.5 each @ c=5 · gmu 0.88 · deep-fill memory-safe | wide multi-user on DCP4 |
-| **`dcp4-cc128`** | 128K | up to c=8 | not yet benchmarked | max-width on DCP4 |
+| **`dcp4-cc128`** | 128K | c=5 | 5×128K=640K fits the 651K pool preempt-free · head-safe · gmu 0.885 | multi-user on DCP4 |
 
 Full per-lane numbers + reproduce commands: [`../benchmarks/`](../benchmarks/README.md).
 
-All lanes run the identical fork stack (image, b12x, MTP k=4, mesh-NCCL, `index_topk_pattern`, `clear_thinking`) — they differ **only** in `max-model-len` / `max-num-seqs` / `max-num-batched-tokens` / cudagraph capture / DCP size / **gpu-memory-utilization**. DCP shards the KV, so it's really one budget you spend on *context* (dcp4 → 655K single-stream) or *width* (dcp4-cc200 → multiple 200K streams).
+All lanes run the identical fork stack (image, b12x, MTP k=4, mesh-NCCL, `index_topk_pattern`, `clear_thinking`) — they differ **only** in `max-model-len` / `max-num-seqs` / `max-num-batched-tokens` / cudagraph capture / DCP size / **gpu-memory-utilization**. DCP shards the KV (pool ∝ DCP degree), so it's really one budget you spend on *context* (dcp4 → 655K single-stream) or *width* (dcp4-cc128 → 5×128K streams on DCP4's 2×-bigger pool).
 
-### Concurrency lanes: gmu, and the two deep-fill failure modes
+### Concurrency lanes: what actually controls capacity
 
-The `-cc` lanes carry two deliberate deltas from the single-stream lanes, both set per-lane in the `case`:
+It comes down to one tension — and two of the knobs you'd *expect* to matter turn out not to. Measured on DCP4/seqs=5, the KV pool is set by **`gpu-memory-utilization` alone**: gmu 0.87→502K, 0.88→595K, 0.885→651K, 0.89→709K tokens (~+11K per +0.001). `max-num-seqs` and cudagraph `capture` do **not** move it (seqs 6 vs 8 → 604K vs 612K; capture 32 vs 48 → 606K vs 612K — noise).
 
-- **`L_GMU=0.88`** (single-stream lanes use 0.89). Five concurrent *deep* prefills hold ~1 GiB more rank-0 working set than one stream; at 0.89 that breached the head's 1.5 GiB watchdog. `0.88` frees ~1.1 GiB/node and clears it (costs ~2% KV). Override at runtime with `GLM_GMU=…`.
-- **`L_BATCHED=2048`** (not 4096). Small prefill chunks *interleave* one stream's big prefill with everyone else's decode, so a user pasting a 50K doc dips the others instead of starving them.
-
-A concurrency lane's `max-num-seqs` is the *shallow* ceiling. **Always deep-fill it before trusting its width**, and read the failure by its signature:
-
-| symptom | cause | lever |
+| knob | controls | does *not* control |
 |---|---|---|
-| head watchdog-kills **during prefill ramp**, KV usage still ~0% | rank-0 prefill working set (scales with streams × depth) | **lower `L_GMU`** (0.88 → 0.87…) — *not* `L_BATCHED`, *not* context |
-| **preemptions > 0** + per-stream t/s sags mid-decode | KV-pool capacity — resident set exceeds the pool | fewer / shorter streams (e.g. `dcp4-cc128`) |
+| **`L_GMU`** | KV pool size **and** head-memory headroom — in opposition | — |
+| **`L_SEQS`** | concurrency + head survival (fewer seqs = more headroom) | the pool |
+| **`L_CAPTURE`** | decode-graph coverage; set `≥ seqs×(1+spec_tokens)` (=25 at seqs=5) | the pool |
+| **`L_DCP`** | pool ∝ DCP degree (DCP4 ≈ 2× DCP2 at the same gmu) | — |
 
-**Don't be scared off by a cold-fill TTFT.** Filling all streams to max depth *cold and simultaneously* (0% prefix cache) gives a pathological TTFT (tens of minutes for 5×197K) — that's a stress artifact, not the serving speed. Real multi-turn agents **amortize via prefix cache**: each turn only re-prefills its *delta* (new message + tool results), the resident history is a cache hit, so per-turn TTFT stays small. `clear_thinking=false` + `--enable-prefix-caching` (already in every lane) are what keep that prefix stable. Usable ceiling ≈ *streams whose combined resident KV fits the pool* (dcp4-cc200: ~5 × ≤197K ≈ 89% of its ~1.1M-token pool).
+**The gmu tension is the whole game:** higher gmu = bigger pool (fits more resident streams) but *less* head headroom; lower = head-safe but smaller pool. Each lane's gmu is tuned to where its advertised streams **fit the pool preempt-free** *and* the head survives a cold-prefill burst. For `dcp4-cc128` that's **0.885** — 651K pool fits 5×128K=640K, head plateaus ~1.8 GiB (0.89 fits the pool but kills the head; 0.88 is head-safe but ~5% short).
+
+**Read a failure by its signature** (note the two fixes pull gmu in *opposite* directions — that's why the default is a deliberate razor):
+
+| symptom | cause | fix |
+|---|---|---|
+| head watchdog-kills **during prefill ramp**, KV usage still low | rank-0 prefill working set (scales with *concurrent* deep prefills) | **lower gmu** or **fewer seqs** — *not* batched-tokens, *not* context |
+| **preemptions > 0**, per-stream t/s sags mid-decode | resident set exceeds the pool | **higher gmu** (bigger pool) or fewer/shorter streams |
+
+**Don't be scared off by a cold-fill TTFT.** Filling every stream to max depth *cold and simultaneously* (0% prefix cache) gives a pathological TTFT — a stress artifact, not the serving speed. Real multi-turn agents **amortize via prefix cache**: each turn only re-prefills its *delta*, the resident history is a cache hit, so per-turn TTFT stays small. `clear_thinking=false` + `--enable-prefix-caching` (every lane) keep that prefix stable.
+
+### Runtime overrides (optional — most people should just use the lane default)
+
+Each lane's defaults are already tuned; **if in doubt, pick a lane and run it as-is.** The overrides below are only for when you've looked at [`../benchmarks/`](../benchmarks/README.md) and want a different point on the curve for your workload (many shallow agents vs. a few deep ones).
+
+> ⚠️ **Two costs to know before you turn a knob up:**
+> - **Higher concurrency → slower per-stream decode.** It's a throughput/latency trade, not free capacity. E.g. `dcp4-cc128`: c=1 gives ~25 tok/s/stream, c=5 gives ~10.5. More agents, each slower.
+> - **Higher context / bigger prefill → much longer TTFT.** Loading a deep prompt cold is `O(n²)` attention; a fresh 197K prompt is *minutes* of time-to-first-token, and several deep prompts arriving cold at once multiply that (they share one prefill budget). Steady multi-turn use hides this via prefix cache — a *cold* deep load does not.
+
+Set these env vars at launch to override the lane without touching the file:
+
+| env var | overrides | example |
+|---|---|---|
+| `GLM_SEQS` | `--max-num-seqs` (concurrency ceiling) | `GLM_LANE=dcp4-cc128 GLM_SEQS=5 ./glm-serve.sh start` |
+| `GLM_GMU`  | `--gpu-memory-utilization` (sizes the pool) | `GLM_LANE=dcp4-cc128 GLM_GMU=0.89 ./glm-serve.sh start` |
+
+**`GLM_SEQS` sets a lane's concurrency default — it is not a cap, and there's no enforced maximum.** It does **not** resize the pool (that's `GLM_GMU`); it changes how many streams schedule and how much head headroom you keep. Raising it is usually safe: real traffic rarely has every stream at full context at once, so the pool usually isn't exhausted, and if it is you get **graceful preemption** (a re-prefill stall on one stream), not a crash. The one hard edge: a burst of many *cold deep* prefills at a high `GLM_SEQS` can breach the head watchdog (a container restart) — the boundary each lane's default sits below. (Raising seqs well above the default may also want a bigger `L_CAPTURE` = `seqs×(1+spec_tokens)`, else big decode batches run eager — slower, never a crash.) vLLM prints the actual pool at boot: `GPU KV cache size: N tokens` / `Maximum concurrency for <ctx>/request: X.XX×`.
 
 ```bash
 GLM_LANE=dcp2 ./glm-serve.sh start        # 327K flagship
 ./glm-serve.sh start                      # default = dcp2 (flagship)
-GLM_LANE=dcp4-cc200 ./glm-serve.sh start  # wide multi-user
+GLM_LANE=dcp4-cc128 ./glm-serve.sh start  # multi-user (5×128K)
 GLM_LANE=dcp2 ./glm-serve.sh dry-run      # print docker commands, run nothing
 ./glm-serve.sh stop                       # tear down on all nodes
 ```
