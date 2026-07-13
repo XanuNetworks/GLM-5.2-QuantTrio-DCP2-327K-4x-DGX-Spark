@@ -66,23 +66,17 @@ WEIGHTS_DIR="/var/tmp/models"
 KERNELS_DIR="$HOME/glm-triton"
 
 # ---------------------------------------------------------------------------
-# LANE SELECTOR — GLM_LANE=fast (default) or GLM_LANE=dcp2 (this recipe, below).
-#   fast: 200K ctx, upstream vLLM, no DCP — the original simpler config, kept as
-#         a fallback for anyone not running the fork. NOT benchmarked recently;
-#         don't quote a tok/s for it (its old number predates this work).
-#   dcp2: the flagship — 327K ctx, fork stack, DCP2, MTP k=4 (overrides below).
-#         This is the tested/benchmarked path (~25 tok/s coherent).
-# (The experimental upstream-vLLM `dcp` lane was removed; the fork's dcp2 is the
-#  DCP path. See git history for the old upstream-DCP + LSE-patch route.)
+# LANE SELECTOR — both lanes run the fork stack, differing ONLY in
+# context-vs-concurrency (detail + how to add a lane: scripts/README.md):
+#   dcp2       — 327K ctx, single-user, max-speed  → flagship (~25 t/s coherent)
+#   concurrent — 200K ctx, multi-user (c=2/c=3)    → ~50 t/s aggregate, ~18 each
 # ---------------------------------------------------------------------------
-GLM_LANE="${GLM_LANE:-fast}"
-# fast-lane defaults (the dcp2 block far below overrides these wholesale):
-DCP_FLAGS=""
-LANE_MAXLEN=200000
-LANE_SEQS=6
-LANE_KERNELCFG=""
-LANE_KVBYTES=10950000000
-LANE_COMPCFG='{"cudagraph_mode":"FULL"}'
+GLM_LANE="${GLM_LANE:-dcp2}"
+case "$GLM_LANE" in
+  dcp2)       L_MAXLEN=327680; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10 ;;
+  concurrent) L_MAXLEN=200000; L_SEQS=3; L_BATCHED=4096; L_CAPTURE=16 ;;
+  *) echo "GLM_LANE must be 'dcp2' (327K, c=1) or 'concurrent' (200K, c=3); got '$GLM_LANE'" >&2; exit 1 ;;
+esac
 # ============================================================================
 
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -150,8 +144,7 @@ ENVV=(
   # (packet_seq_err ~1K/sender per 40K-token prefill); decode is loss-free.
   -e "NCCL_IB_TC=106"
 )
-# Fast lane = V1 runner. The dcp2 block sets VLLM_USE_V2_MODEL_RUNNER itself;
-# don't enable it on the fast lane or its autotune dummy-run wedges the boot.
+# (Both lanes set VLLM_USE_V2_MODEL_RUNNER in the fork block below.)
 
 # Triton sparse-MLA kernels, bound read-only over the vLLM tree (matches
 # GLM52_BIND_HOST_TRITON=1). Paths are inside the image's vLLM install.
@@ -159,19 +152,6 @@ MLA="/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/backends/mla"
 OPS="/usr/local/lib/python3.12/dist-packages/vllm/v1/attention/ops/deepseek_v4_ops"
 LAYERS="/usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers"
 MODELS="/usr/local/lib/python3.12/dist-packages/vllm/model_executor/models"
-KMOUNTS=(
-  -v "$KERNELS_DIR/sparse_mla_kernels.py:$MLA/sparse_mla_kernels.py:ro"
-  -v "$KERNELS_DIR/sparse_mla_env.py:$MLA/sparse_mla_env.py:ro"
-  -v "$KERNELS_DIR/sm12x_sparse_mla_attn.py:$MLA/sm12x_sparse_mla_attn.py:ro"
-  -v "$KERNELS_DIR/patch_flashmla_ops.py:$MLA/patch_flashmla_ops.py:ro"
-  -v "$KERNELS_DIR/flashmla_sparse.py:$MLA/flashmla_sparse.py:ro"
-  -v "$KERNELS_DIR/sm12x_deep_gemm_fallbacks.py:$OPS/sm12x_deep_gemm_fallbacks.py:ro"
-  -v "$KERNELS_DIR/sm12x_mqa.py:$OPS/sm12x_mqa.py:ro"
-  -v "$KERNELS_DIR/b12x_sparse_helpers.py:$OPS/b12x_sparse_helpers.py:ro"
-  # upstream vLLM #46862: fused indexer Q rope+fp8-quant (fused_indexer_q_rope_quant)
-  -v "$KERNELS_DIR/sparse_attn_indexer.py:$LAYERS/sparse_attn_indexer.py:ro"
-  -v "$KERNELS_DIR/deepseek_v2.py:$MODELS/deepseek_v2.py:ro"
-)
 
 # docker run base — IB passthrough is REQUIRED (without --device=/dev/infiniband
 # + IPC_LOCK + memlock, NCCL silently drops to TCP: ~12 vs 30+ tok/s).
@@ -185,70 +165,6 @@ BASE=(
   -v "$HOME/vllm/glm-container-entrypoint.sh:/glm-container-entrypoint.sh:ro"
 )
 
-# The serving command, with {port} resolved.
-# NOTE: --max-num-seqs 6 requires the indexer MTP-overhang patch baked into the
-# image (patches/fix-indexer-mtp-overhang.py, README step h) — unpatched vLLM
-# crashes at >= 3 concurrent requests with MTP enabled.
-SERVE=(
-  /glm-container-entrypoint.sh
-  vllm serve /cache/huggingface/hub/glm52-int4-int8mix
-  --served-model-name glm-5.2 --host 0.0.0.0 --port "$PORT"
-  --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice
-  # index_topk_pattern (both lanes — model-correctness fix, found in
-  # CosmicRaisins' README 2026-07-10): GLM-5.2 trains indexer weights on only
-  # 21/78 layers; QuantTrio ships index_topk_pattern:null and vLLM then runs
-  # top-k through UNINITIALIZED weights on the 57 'shared' layers — coherent
-  # under ~2K ctx, degrades beyond, craters MTP acceptance at depth (we
-  # measured per-position acceptance 0.88/0.46/0.18/0.00 at 120K before this).
-  # Pattern derived from the checkpoint's indexer_types; matches CosmicRaisins'.
-  --hf-overrides '{"index_topk_pattern":"FFFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSSFSSS"}'
-  --enable-prefix-caching
-  --async-scheduling
-  # MTP k=4 with the draft attention backend aligned to the backend our stack
-  # actually selects for the main model (FLASHINFER_MLA_SPARSE_SM120, from
-  # FlashInfer 0.6.14's native SM120 sparse-MLA support). Tony's original pinned
-  # "FLASHMLA_SPARSE" here — on his older FlashInfer that WAS the main backend,
-  # but on ours it mismatches: main allocates the 656-byte DSA KV record while
-  # the FLASHMLA_SPARSE draft group expects plain-MLA 576 → the
-  # "shape [3126,64,576] invalid for input of size 131241984" crash.
-  --speculative-config '{"method":"mtp","num_speculative_tokens":4,"draft_tensor_parallel_size":1,"attention_backend":"FLASHINFER_MLA_SPARSE_SM120"}'
-  --tensor-parallel-size 4 --pipeline-parallel-size 1
-  # DCP4: shard the KV cache sequence-wise across the 4 TP ranks during decode.
-  # With MLA the KV is otherwise replicated per rank, so DCP multiplies effective
-  # KV capacity 4x — the same 10.95 GB/node pool supports ~800K tokens; we serve
-  # 512K. Forum ref (thread 375416): DCP4+MTP4 held 20-37 tok/s to 640K.
-  ${DCP_FLAGS}
-  # 256K probe boot (was 512K): the 512K DCP boot froze all 4 nodes when a
-  # FlashInfer autotune warmup allocation blew past unified memory (NVRM
-  # NV_ERR_NO_MEMORY, 07-10). Autotune is disabled below; step context back
-  # up only after a stable boot + depth test.
-  --max-model-len ${LANE_MAXLEN} --max-num-seqs ${LANE_SEQS} --max-num-batched-tokens 8192
-  # Skip FlashInfer autotune entirely — its mixed prefill/decode dummy run was
-  # the allocation that killed the boxes. Cost: slightly untuned decode kernel.
-  ${LANE_KERNELCFG}
-  # gpu-mem-util 0.91 (tony's value). Pre-firmware our CUDA-visible free was
-  # ~108 GB and 0.91's 110.68 GiB gate failed — we ran 0.88. Post-firmware
-  # (driver 580.159.03) free is 112.69 GiB, so 0.91 fits with ~2 GiB margin.
-  # KV stays pinned below; 0.91 only widens the activation/cudagraph budget.
-  # KV shrunk 10.95G → 8.5G for DCP: the DCP4 boot at 10.95G left only
-  # 0.5-0.9 GiB available per node (allgather buffers + 64-head decode +
-  # extra graphs eat the old headroom) — one request away from another
-  # freeze. 8.5G still gives a ~620K-token pool = 2.4x concurrency at 256K.
-  # KV 7.0G (stepped down from tony's 10.95 through 8.5/8.0 during the DCP
-  # bring-up): at 8.0 the boot SERVED with only 1.7 GiB free on the head and
-  # the FIRST REQUEST's init (flashinfer workspace + Triton JIT + request
-  # buffers) hit the ~1.5 GiB floor. 7.0 gives the head ~2.7 GiB steady.
-  # Pool ~512K logical tokens at DCP4 = 2.0x concurrency at 256K.
-  --gpu-memory-utilization 0.91 --kv-cache-memory-bytes ${LANE_KVBYTES}
-  --kv-cache-dtype fp8_ds_mla
-  # FULL graphs restored (PIECEWISE measured 9.8 tok/s — eager decode launch
-  # overhead on Grace CPU is ~3x per-step cost; MTP acceptance was healthy at
-  # 50%/3.0 so spec decode wasn't the issue). The earlier FULL+capture-32 boot
-  # died at 1.6-2.0 GiB during decode capture with KV 8.5G; at KV 7.0G we have
-  # +1.5 GiB more floor, so capture should bottom ~3.5 GiB — above the 1.5 GiB
-  # watchdog. vLLM auto-downgrades FULL to FULL_AND_PIECEWISE for this backend.
-  --distributed-executor-backend mp --compilation-config "${LANE_COMPCFG}"
-)
 
 # ---------------------------------------------------------------------------
 # GLM_LANE=dcp2 — CosmicRaisins' validated DCP2-320K recipe on the FORK stack
@@ -260,7 +176,7 @@ SERVE=(
 # host Triton kernel mounts and the LSE patch mount MUST be dropped (they'd
 # shadow fork files with incompatible upstream-era code).
 # ---------------------------------------------------------------------------
-if [ "$GLM_LANE" = "dcp2" ]; then
+if [ "$GLM_LANE" = "dcp2" ] || [ "$GLM_LANE" = "concurrent" ]; then
   IMAGE="vllm-node-eldritch-dcp:e232d26-modded"
   KMOUNTS=(
     # glm52-gb10 prewarm-tolerance patch (tony's NF3 fix pattern): sm_121a
@@ -329,14 +245,14 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     # batched-tokens 2048 (recipe: 4096): the 150K-deep prefill's activation
     # transient drove the head through the ~1.5 GiB floor (1.48 GiB, 18:19).
     # Halving the chunk halves the transient; costs some prefill throughput.
-    --max-model-len 327680 --max-num-seqs 1 --max-num-batched-tokens 2048
+    --max-model-len ${L_MAXLEN} --max-num-seqs ${L_SEQS} --max-num-batched-tokens ${L_BATCHED}
     # gmu 0.89 (recipe: 0.90): the head rode ~2.1G available and a tg512 bench
     # drove it through the ~1.5G floor on 2026-07-12. -0.01 gmu ≈ +1.1G
     # floor per node; KV pool is unaffected (auto-sized from the gmu budget,
     # loses ~2% capacity).
     --gpu-memory-utilization 0.89 --kv-cache-dtype fp8_ds_mla
     --async-scheduling
-    --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":10}'
+    --distributed-executor-backend mp --compilation-config '{"cudagraph_mode":"FULL","max_cudagraph_capture_size":'"${L_CAPTURE}"'}'
   )
 fi
 

@@ -8,7 +8,7 @@
 # (NODES, users, IPs, image name). See project_glm_5_2_cluster.md for full details.
 #
 # Endpoint:  http://192.168.NNN.1:8000/v1  (served-model-name: glm-5.2)
-# Max ctx:   327680 (GLM_LANE=dcp2, this recipe) / 200000 (default fast lane)
+# Max ctx:   327680 (dcp2, default) / 200000 (concurrent lane)
 # Cold boot: ~12 min weight load + ~10 min cudagraph warmup = ~22 min to serve
 #
 # Usage:
@@ -87,27 +87,17 @@ if [ "$clock_bad" = 1 ] && [ "${GLM_SKIP_CLOCK_CHECK:-0}" != 1 ]; then
   exit 1
 fi
 
-# Memory watchdogs: armed ONLY for the DCP lane. The fast lane is proven
-# stable without them, and its autotune phase transiently dips below the
-# 1.5 GiB line — a watchdog would kill a boot that always succeeds. For the
-# DCP lane the watchdog is mandatory (its warmup froze all 4 boxes once).
-if [ "${GLM_LANE:-fast}" = "dcp" ] || [ "${GLM_LANE:-fast}" = "dcp2" ]; then
-  echo "[preflight] arming memory watchdog on all 4 nodes (DCP lane) ..."
-  for ip in 11 12 13 14; do
-    # Two SEPARATE ssh calls: combining pkill + start in one command line makes
-    # pkill match its own wrapper shell (the launch path contains the pattern)
-    # and kill the ssh session — watchdogs silently never start. Bit us twice.
-    ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "pkill -f '[g]lm-memwatch' 2>/dev/null; true"
-    ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "setsid nohup \$HOME/vllm/glm-memwatch.sh >/dev/null 2>&1 </dev/null & exit 0"
-    ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "sleep 1; grep -q 'memwatch armed' /tmp/glm-memwatch.log 2>/dev/null" \
-      && echo "  .${ip}: watchdog armed (verified)" || echo "  .${ip}: WATCHDOG NOT RUNNING — aborting launch"
-  done
-else
-  echo "[preflight] fast lane — disarming any leftover memory watchdogs ..."
-  for ip in 11 12 13 14; do
-    ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "pkill -f '[g]lm-memwatch' 2>/dev/null; true" && echo "  .${ip}: clear"
-  done
-fi
+# Memory watchdog: both lanes run DCP and can press the unified-memory floor, so
+# arm it on every node (a warmup once froze all 4 boxes). Detail: utils/README.
+echo "[preflight] arming memory watchdog on all 4 nodes ..."
+for ip in 11 12 13 14; do
+  # Two SEPARATE ssh calls: combining pkill + start in one line makes pkill match
+  # its own wrapper shell and kill the ssh session — watchdogs never start.
+  ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "pkill -f '[g]lm-memwatch' 2>/dev/null; true"
+  ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "setsid nohup \$HOME/vllm/glm-memwatch.sh >/dev/null 2>&1 </dev/null & exit 0"
+  ssh -o ConnectTimeout=3 "YOURUSER@192.168.NNN.${ip}" "sleep 1; grep -q 'memwatch armed' /tmp/glm-memwatch.log 2>/dev/null" \
+    && echo "  .${ip}: watchdog armed (verified)" || echo "  .${ip}: WATCHDOG NOT RUNNING — aborting launch"
+done
 
 # Preflight: (re)apply NIC PFC/DSCP-trust on every node — mlnx_qos settings
 # don't survive reboots. Runs via privileged container (mlnx_qos needs

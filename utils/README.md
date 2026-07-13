@@ -9,6 +9,7 @@ lives in [`scripts/`](../scripts/); these are the extras.)
 | **`check-clocks.sh`** | Burns each GPU 5 s and reads its clock under load — catches the GB10 **stuck-low-clock bug** (a wedged GPU gates the whole TP cluster). | Decode is slower than expected; before a long serving session; any time a node "feels" slow. |
 | **`benchmark.sh`** | Reproduces the README numbers against a running endpoint: coherent real-world decode, random-token floor, cold prefill. | After bring-up, to confirm you built the recipe right; to compare a config change. |
 | **`stage.sh`** | One-time staging of weights + NCCL + kernels onto every node (scaffold — review before running; weights are ~400 GB). | First-time setup, before the first launch. |
+| **`glm-memwatch.sh`** | Optional unified-memory watchdog — `docker kill`s the container if MemAvailable drops below ~1.5 GiB. `glm-serve.sh` stages + arms it on each node automatically. | Runs itself; nothing to invoke manually. |
 
 ## check-clocks.sh
 The single highest-value check. A GB10 can silently wedge one GPU at ~660 MHz
@@ -39,3 +40,12 @@ random one as an honest floor.
 Scaffold for the one-time staging the launcher assumes (per-node weights symlink,
 `libnccl.so.2`, Triton kernels). Review each step — the ~400 GB weight transfer
 should be planned, not fired blindly.
+
+## glm-memwatch.sh
+GB10 uses unified memory, so a runaway allocation can starve the whole OS (sshd
+included) — an early uncontrolled OOM once hard-froze all four nodes. As
+insurance, this watchdog `docker kill`s the vLLM container when MemAvailable drops
+below ~1.5 GiB (1 s poll). `glm-serve.sh` stages it to each node and arms it in
+preflight — you never run it by hand. Honest note: in the tuned configs it rarely
+fires (the head sits well above the floor); it earns its keep only on tighter
+gmu/chunk settings. Keep it as a cheap backstop, not a proven safety net.

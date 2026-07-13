@@ -24,22 +24,24 @@ YOU RUN:  GLM_LANE=dcp2 ./glm-serve.sh start
      • auto-detects the RoCEv2 GID index, then `exec`s `vllm serve`
 ```
 
-`glm-memwatch.sh` is a 4th helper — the optional unified-memory watchdog that
-`glm-serve.sh` arms on each node (see the main README).
+The optional unified-memory watchdog now lives in [`../utils/glm-memwatch.sh`](../utils/README.md#glm-memwatchsh) — `glm-serve.sh` stages + arms it on each node.
 
 ## Lanes (config variants live HERE, not in new scripts)
 
 Config differences are **lanes**, selected with `GLM_LANE`, defined inside
 `glm-node-launch.sh`. Do **not** clone `glm-serve.sh` per config.
 
-| `GLM_LANE` | ctx | stack | notes |
-|---|---|---|---|
-| `dcp2` (this recipe) | 327K | fork vLLM + b12x, DCP2, MTP k=4 | the flagship; tested (~25 t/s coherent) |
-| `fast` (default) | 200K | upstream vLLM, no DCP | simpler fallback; **not benchmarked recently** |
+| `GLM_LANE` | ctx | concurrency | measured | role |
+|---|---|---|---|---|
+| **`dcp2`** (default) | 327K | c=1 | ~25 t/s coherent | 🏆 flagship — single-user, max depth + speed |
+| **`concurrent`** | 200K | c=2/c=3 | ~50 t/s aggregate · ~18 each @ c=3 · TTFT ~1.3 s | multi-user serving |
+| `dcp4` *(future)* | 655K | c=1 | — | max-context specialty (DCP4); not yet added |
+
+Both run the identical fork stack (image, b12x, MTP k=4, mesh-NCCL, `index_topk_pattern`, `clear_thinking`) — they differ **only** in `max-model-len` / `max-num-seqs` / cudagraph capture. DCP2 stays on for both; its 2× KV sharding is what lets `concurrent` fit 3×200K.
 
 ```bash
 GLM_LANE=dcp2 ./glm-serve.sh start     # 327K flagship
-./glm-serve.sh start                   # default = fast lane
+./glm-serve.sh start                   # default = dcp2 (flagship)
 GLM_LANE=dcp2 ./glm-serve.sh dry-run   # print docker commands, run nothing
 ./glm-serve.sh stop                    # tear down on all nodes
 ```
