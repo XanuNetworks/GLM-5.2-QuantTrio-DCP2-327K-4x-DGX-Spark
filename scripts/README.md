@@ -36,9 +36,9 @@ Naming: `<dcp-size>[-cc<per-stream-K>]`. Bare = single-stream (c=1); `-ccNNN` = 
 | `GLM_LANE` | ctx | concurrency | measured | role |
 |---|---|---|---|---|
 | **`dcp2`** (default) | 327K | c=1 | ~25 t/s coherent | 🏆 flagship — single-user, max depth + speed |
-| **`dcp4-cc200`** | 200K | c=3 | 3×200K=600K fits the 651K pool preempt-free · head-safe · gmu 0.885 | multi-user on DCP4 |
+| **`dcp4-cc200`** | 200K | c=3 | 3×200K=600K fits the 651K pool preempt-free · head-safe | multi-user on DCP4 |
 | **`dcp4`** | 655K | c=1 | ~24 t/s coherent | max-context specialty (DCP4's 4× KV) |
-| **`dcp4-cc128`** | 128K | c=5 | 5×128K=640K fits the 651K pool preempt-free · head-safe · gmu 0.885 | multi-user on DCP4 |
+| **`dcp4-cc128`** | 128K | c=5 | 5×128K=640K fits the 651K pool preempt-free · head-safe | multi-user on DCP4 |
 
 Full per-lane numbers + reproduce commands: [`../benchmarks/`](../benchmarks/README.md).
 
