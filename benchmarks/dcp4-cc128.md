@@ -36,6 +36,8 @@ sampler misses the fast trough (at 0.89 the head fell 3.03→1.16 in ~50 s betwe
 
 ## Concurrency scaling (llama-benchy `tool-eval-bench --perf`, pp8000/tg512, 2026-07-13)
 
+*Synthetic-prompt floor — real coherent decode ~5–10% higher.*
+
 | c | per-stream decode t/s | prefill t/s |
 |---|---|---|
 | 1 | 23.3 | 571 |

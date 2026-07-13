@@ -6,17 +6,24 @@
 
 ## Decode throughput (single stream)
 
-Fresh re-measure (2026-07-13, llama-benchy via `tool-eval-bench --perf`):
+Fresh re-measure (2026-07-13). **Coherent** = real code prompts; synthetic `tg` is a floor.
 
-| context depth | decode t/s | prefill t/s |
-|---|---|---|
-| ~16K | **24.0** | 559 |
-| 32K | 23.2 | 551 |
-| 120K | **21.6** | 542 |
+| context | coherent decode t/s | synthetic floor | prefill |
+|---|---|---|---|
+| 32K | 20.8 | 23.2 | ~551 |
+| 120K | 21.1 | 21.6 | ~542 |
+| 300K | 21.0 | — | — |
 
-**This lane holds decode to depth better than the flagship** — only ~10% off shallow even
-at **120K context** (dcp2 drops ~20% by 32K). DCP4's 4-way attention sharding offsets the
-extra cross-rank comm at long context, so decode barely degrades as the context grows.
+Decode is **flat ~21 t/s across all depths** — DCP4's 4-way KV sharding keeps the per-token
+cost steady out to 300K+.
+
+**But `dcp2` is faster-or-equal at every depth ≤327K** (coherent: 23.7 vs 20.8 at 32K; then
+tied ~21 from 120K on). DCP4's extra 4-way comm tax isn't offset by its finer sharding until
+very deep context — and even at 300K it only *ties* dcp2, never beats it. So the synthetic
+"flatter to depth" edge is a floor artifact; on real text DCP4 has no decode advantage.
+
+**dcp4's real (and only) advantage is the context *ceiling*: 327K → 655K.** Use it when you
+genuinely need >327K per stream; at or below 327K, `dcp2` is the faster choice.
 
 Pool: **707,584 tokens** (1.08× at 655K → one full 655K stream). Tool Eval Bench: **87/100 ★★★★**.
 

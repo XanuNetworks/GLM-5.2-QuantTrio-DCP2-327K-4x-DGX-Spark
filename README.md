@@ -31,7 +31,7 @@ All four run the identical fork stack — they differ only in how the one KV bud
 ### What you get
 
 - 🧠 **Full model, no pruning** — all 256 experts on 4 nodes, from 128K per stream up to 655K single-user context depending on lane.
-- 📏 **Holds to depth** — `dcp4` keeps ~90% of its shallow decode even at **120K context** (21.6 t/s, DCP4's attention sharding); the 327K flagship holds ~80% at 32K.
+- 📏 **Holds to depth** — the flagship's *coherent* decode barely fades: ~24.6 shallow → ~21 t/s and then **flat out to 300K** (sparse attention caps the per-token cost). It does not crawl at depth.
 - 🔁 **One recipe, four lanes** — the same fork stack serves single-user *depth* (`dcp2`/`dcp4`) or multi-user *width* (the `-cc` lanes); switch with one env var (see the table above). Each lane is tuned so its streams fit the KV pool with no preemption.
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
@@ -39,14 +39,17 @@ All four run the identical fork stack — they differ only in how the one KV bud
 
 Flagship `dcp2`, single-stream, all four GPUs at full clock (llama-benchy via `tool-eval-bench`, healthy-cluster re-measure 2026-07-13):
 
-| workload | tok/s |
+Coherent decode (real code prompts) at increasing context depth:
+
+| workload | coherent tok/s |
 |---|---|
-| **Decode — coherent (real coding prompts)** | **~24.5** |
-| Decode — shallow (~16K ctx) | 23.2 |
-| Decode — @ 32K context depth | 18.6 |
+| **Decode — shallow (~16K)** | **~24.6** |
+| Decode — @ 32K | 23.7 |
+| Decode — @ 120K | 21.0 |
+| Decode — @ 300K | 21.4 |
 | Prefill (cold, ~16K ingest) | ~714 |
 
-MTP **k=4**. Single-stream (`max-num-seqs 1`) — one-user, max-speed, not a concurrent-serving config. The **`dcp4`** lane actually holds decode *flatter* to depth (21.6 t/s even at 120K — see [benchmarks/](benchmarks/README.md)). Reproduce with `tool-eval-bench --perf` or **`utils/benchmark.sh`**.
+MTP **k=4**. These are **coherent** (real-workload) numbers — the llama-benchy synthetic floor reads lower (e.g. 18.6 @32K) but random filler tanks MTP acceptance and doesn't reflect real use. Tool calling: **87/100 ★★★★**. Notably, on coherent workloads `dcp2` is **faster-or-equal to `dcp4` at every depth it reaches (≤327K)** — `dcp4` earns its place only for context *beyond* 327K (up to 655K). Reproduce with `tool-eval-bench --perf`.
 
 > 📏 **Prose beats random by ~10-15%.** Random-token benches (`--dataset-name random`) tank MTP acceptance — real coherent prompts generate predictable, structured output the draft head accepts far more often, so `tg512`-on-random *understates* real-world decode. The **~24.5 coherent** figure is what you'll actually see; the ~21 random floor is pessimistic. (Watch out for prefix-cache pollution too — repeated random prompts at a fixed seed cache-hit and report fake-fast prefill.)
 

@@ -6,17 +6,25 @@
 
 ## Decode throughput (single stream)
 
-Fresh healthy-cluster re-measure (2026-07-13, llama-benchy via `tool-eval-bench --perf`):
+Fresh healthy-cluster re-measure (2026-07-13). **Coherent** = real code prompts (what you'll
+actually see); the llama-benchy synthetic `tg` is a pessimistic floor (random filler tanks
+MTP draft-acceptance).
 
-| workload | tok/s | notes |
+| context | coherent decode t/s | synthetic floor |
 |---|---|---|
-| coherent (real coding prompts) | **~24.5** | MTP acceptance is higher on natural text |
-| shallow (~16K ctx) | 23.2 | llama-benchy `tg` |
-| @ 32K context depth | **18.6** | ~20% off shallow — for flatter depth use `dcp4` (21.6 t/s at 120K) |
+| shallow (~16K) | **24.6** | 23.2 |
+| 32K | **23.7** | 18.6 |
+| 120K | 21.0 | — |
+| 300K | **21.4** | — |
 
-The healthy-cluster number came after clearing a stuck-clock bug (one GPU wedged at
-660 MHz gated all four): the same config read **15.6 tok/s** before the cold-cycle fix.
-See "Is your decode slow?" in [docs/troubleshooting.md](../docs/troubleshooting.md).
+**Decode barely degrades to depth on real workloads** — it eases from ~24.6 to ~21 by 120K,
+then *plateaus* (~21 all the way to 300K, near the 327K ceiling — sparse attention caps the
+per-token cost). The synthetic "18.6 @32K" is a floor artifact; the coherent figure is 23.7.
+`dcp2` is faster-or-equal to `dcp4` at **every depth it reaches** (≤327K) — see [dcp4.md](dcp4.md).
+
+Prefill **~714 t/s**. The healthy-cluster numbers came after clearing a stuck-clock bug (one
+GPU wedged at 660 MHz gated all four): the same config read **15.6 tok/s** before the
+cold-cycle fix — see [docs/troubleshooting.md](../docs/troubleshooting.md).
 
 ## Prefill
 

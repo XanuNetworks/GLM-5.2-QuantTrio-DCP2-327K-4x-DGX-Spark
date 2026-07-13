@@ -22,6 +22,8 @@ Head margin here (~0.7 GiB) is more comfortable than `dcp4-cc128`'s (~0.3) — f
 
 ## Concurrency scaling (llama-benchy `tool-eval-bench --perf`, pp8000/tg512, 2026-07-13)
 
+*Synthetic-prompt floor — real coherent decode ~5–10% higher.*
+
 | c | per-stream decode t/s | prefill t/s |
 |---|---|---|
 | 1 | 21.9 | 568 |
