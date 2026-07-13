@@ -253,7 +253,7 @@ SERVE=(
   # KV 7.0G (stepped down from tony's 10.95 through 8.5/8.0 during the DCP
   # bring-up): at 8.0 the boot SERVED with only 1.7 GiB free on the head and
   # the FIRST REQUEST's init (flashinfer workspace + Triton JIT + request
-  # buffers) tripped the 1.5 GiB watchdog. 7.0 gives the head ~2.7 GiB steady.
+  # buffers) hit the ~1.5 GiB floor. 7.0 gives the head ~2.7 GiB steady.
   # Pool ~512K logical tokens at DCP4 = 2.0x concurrency at 256K.
   --gpu-memory-utilization 0.91 --kv-cache-memory-bytes ${LANE_KVBYTES}
   --kv-cache-dtype fp8_ds_mla
@@ -292,8 +292,10 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     -e "GLM52_BIND_HOST_TRITON=0"
     # Dual-rail NCCL (matches CosmicRaisins' recipe): rail-2 (enP2p1s0f0np0 /
     # roceP2p1s0f0) verified UP, MTU 9000, full jumbo mesh, RoCEv2 IPv4 GID at
-    # idx=3 on all nodes (2026-07-10). DCP does per-layer per-step ag_rs — the
-    # single-rail config was the prime suspect for 15.7 vs their 22 tok/s.
+    # idx=3 on all nodes. DCP does per-layer per-step ag_rs, so both rails help
+    # the collective. (For the record, the decode gap that had us chasing rails/
+    # channels/cutlass was NOT any of them — it was a GPU stuck at 1/4 clock;
+    # see the clock-health preflight in start-glm-5.2.sh.)
     -e "NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0"
     -e "NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0"
     # Channels 8 -> 4 for DCP (overrides the global pin; docker takes the last
@@ -314,7 +316,7 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0"
     # NOT enabled: VLLM_B12X_MLA_SPEC_EXTEND_AS_DECODE=1 (ciprianveg #155,
     # +5-10% at dcp1) — tested 2026-07-11 at DCP2: no decode gain (13.8 vs
-    # 12.8-13.9 baseline) and the d8K bench leg tripped the 1.5GiB watchdog
+    # 12.8-13.9 baseline) and the d8K bench leg hit the ~1.5GiB floor
     # (extra workspace from the decode-shaped verify path). Reverted.
   )
   SERVE=(
@@ -341,11 +343,11 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1
     --attention-backend B12X_MLA_SPARSE
     # batched-tokens 2048 (recipe: 4096): the 150K-deep prefill's activation
-    # transient tripped the 1.5 GiB watchdog on the head (1.48 GiB, 18:19).
+    # transient drove the head through the ~1.5 GiB floor (1.48 GiB, 18:19).
     # Halving the chunk halves the transient; costs some prefill throughput.
     --max-model-len 327680 --max-num-seqs 1 --max-num-batched-tokens 2048
-    # gmu 0.89 (recipe: 0.90): the head rode ~2.1G available and the watchdog
-    # (1.5G) killed it during a tg512 bench on 2026-07-12. -0.01 gmu ≈ +1.1G
+    # gmu 0.89 (recipe: 0.90): the head rode ~2.1G available and a tg512 bench
+    # drove it through the ~1.5G floor on 2026-07-12. -0.01 gmu ≈ +1.1G
     # floor per node; KV pool is unaffected (auto-sized from the gmu budget,
     # loses ~2% capacity).
     --gpu-memory-utilization 0.89 --kv-cache-dtype fp8_ds_mla

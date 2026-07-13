@@ -5,7 +5,7 @@
 # (NODES, users, IPs, image name). See project_glm_5_2_cluster.md for full details.
 #
 # Endpoint:  http://192.168.NNN.1:8000/v1  (served-model-name: glm-5.2)
-# Max ctx:   200000
+# Max ctx:   327680 (GLM_LANE=dcp2, this recipe) / 200000 (default fast lane)
 # Cold boot: ~12 min weight load + ~10 min cudagraph warmup = ~22 min to serve
 #
 # Usage:
