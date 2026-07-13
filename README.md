@@ -1,8 +1,9 @@
 # GLM-5.2 (unpruned) on 4× DGX Spark — depth, max context, or multi-user
 
-**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks — one recipe, one script, a lane for each job: **`dcp2`** for **327K single-user** depth (the flagship), **`dcp4`** for **655K max-context**, and **`-cc` concurrency lanes** for **multi-user serving**. TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware.**
+**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks. One recipe, one script, three jobs — pick a lane with `GLM_LANE`: **depth** (`dcp2` — 327K single-user, the flagship), **max context** (`dcp4` — 655K single-user), or **multi-user** (the `-cc` lanes — up to 8 concurrent agents). All five lanes share the same stack: TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware. Trade the one KV budget for depth *or* width — that's the whole idea.**
 
-![context](https://img.shields.io/badge/context-327K-1f6feb)
+![context](https://img.shields.io/badge/context-up_to_655K-1f6feb)
+![concurrency](https://img.shields.io/badge/multi--user-up_to_8_agents-1f6feb)
 ![hardware](https://img.shields.io/badge/hardware-4×_DGX_Spark_(GB10)-76b900)
 ![decode](https://img.shields.io/badge/decode-~25_tok%2Fs_coherent-brightgreen)
 ![prefill](https://img.shields.io/badge/prefill-~720_tok%2Fs-blue)
@@ -18,9 +19,9 @@ A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://gi
 
 ### What you get
 
-- 🧠 **Full model, no pruning** — all 256 experts, at 327K context on 4 nodes.
+- 🧠 **Full model, no pruning** — all 256 experts on 4 nodes, from 128K per stream up to 655K single-user context depending on lane.
 - 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
-- 🔁 **A lane for each job, one script** — `dcp2` (327K single-user, ~25 tok/s coherent — the flagship), `dcp4` (655K max-context, ~24 coherent), and `-cc` concurrency lanes for multi-user serving (`dcp2-cc200`: 200K, ~41 t/s aggregate at c=3). Same fork stack, pick with `GLM_LANE`. (Lane map: [scripts/README](scripts/README.md) · per-lane numbers: [benchmarks/](benchmarks/README.md).)
+- 🔁 **Three jobs, one script** — **depth** (`dcp2`: 327K single-user, ~25 tok/s coherent — flagship), **max context** (`dcp4`: 655K single-user, ~24 coherent), or **multi-user** (`-cc` lanes: up to 8 concurrent agents; `dcp2-cc200` does ~41 t/s aggregate at c=3). One KV budget spent on depth *or* width. Pick with `GLM_LANE`. (Lane map: [scripts/README](scripts/README.md) · per-lane numbers: [benchmarks/](benchmarks/README.md).)
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
