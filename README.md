@@ -4,42 +4,36 @@
 
 ![context](https://img.shields.io/badge/context-327K-1f6feb)
 ![hardware](https://img.shields.io/badge/hardware-4×_DGX_Spark_(GB10)-76b900)
-![decode](https://img.shields.io/badge/decode-~14_tok%2Fs_·_20_peak-blue)
+![decode](https://img.shields.io/badge/decode-~23_tok%2Fs-brightgreen)
 ![prefill](https://img.shields.io/badge/prefill-~365_tok%2Fs-blue)
-![firmware](https://img.shields.io/badge/driver-580.159.03_✓-orange)
+![driver](https://img.shields.io/badge/driver-580.159.03-brightgreen)
+![cutlass](https://img.shields.io/badge/cutlass--dsl-4.6.0-blue)
 ![license](https://img.shields.io/badge/license-Apache_2.0-lightgrey)
 
-A follower-replicable deployment reproducing [CosmicRaisins' DCP2-320K recipe](https://github.com/CosmicRaisins/glm-5.2-gb10) — and the first to document running it on the **current DGX Spark firmware** (driver 580.159.03), which breaks the stack in one specific, fixable way.
+A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://github.com/CosmicRaisins/glm-5.2-gb10), running a **deliberately newer stack than the reference recipes were written against** — the *current* DGX Spark firmware (driver **580.159.03**) with **cutlass-dsl 4.6.0**, **FlashInfer 0.6.15**, and **torch 2.11.0**. Same unpruned model, same 327K context, same **~23 tok/s** decode as the reference cluster — just on the firmware everyone else hasn't updated to yet (with the one landmine it hides, defused below).
 
 > [!WARNING]
-> **On the new firmware, b12x kernels won't compile under `nvidia-cutlass-dsl==4.5.2`** (`ValueError: Operation creation failed`). Pin **4.5.3** — see [Build](#stack--build). If you're about to take the firmware update, do this first and save yourself the debugging session.
+> **Taking the firmware update? Do this first.** On driver 580.159.03, b12x kernels won't compile under `nvidia-cutlass-dsl==4.5.2` (`ValueError: Operation creation failed`) — the version pre-firmware recipes implicitly use. Pin **≥ 4.5.3** (we run 4.6.0). See [Stack](#stack--build).
 
 ### What you get
 
 - 🧠 **Full model, no pruning** — all 256 experts, at 327K context on 4 nodes.
 - 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
 - 🔁 **Two lanes, one script** — `GLM_LANE=dcp2` for 327K, or the upstream-vLLM fallback at 200K/~25 t/s.
-- 🛡️ **Battle-tested ops** — a unified-memory watchdog (GB10 OOM = frozen box otherwise), auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect.
+- 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
 
-llama-benchy, recipe methodology (3 runs, coherent corpus; final config — gmu 0.89, lossless RoCE, 2026-07-12):
+Single-stream `tg512` (`vllm bench serve`), all four GPUs at full clock:
 
-| test | t/s | peak t/s |
-|---|---|---|
-| pp2048 | **365–367** | |
-| tg64 | 14.3 ± 0.8 | 19.7 |
-| tg512 | 12.2 ± 0.6 | 20.0 |
-| pp2048 @ d32768 | 318 | |
-| tg64 @ d32768 | 12.7 | 18.0 |
+| | t/s |
+|---|---|
+| **decode (tg512)** | **~23** |
+| prefill (pp2048) | ~365 |
 
-MTP acceptance 51–59% (mean accepted length 2.8–3.05). Prefill is chunk-limited by a deliberate memory trade ([Gotcha 2](#gotchas-all-learned-the-hard-way)).
+Matches CosmicRaisins' reference cluster — flat to depth, MTP acceptance ~56% (mean accepted length ~2.8). Prefill is chunk-limited by a deliberate memory trade ([Gotcha 2](#gotchas-all-learned-the-hard-way)).
 
-<details>
-<summary><b>Open question: mean decode ~12–14 vs the reference ~22 (peaks match)</b></summary>
-
-Every infrastructure suspect has been measured and eliminated: NCCL on RDMA verbs (not TCP), all 8 rails at full 200G with zero PHY errors, single-vs-dual rail, NCHANNELS 4/8, MTP k=3/4, and a hardware-verified lossless fabric ([below](#lossless-roce-ecn--pfc--optional-worth-it)). The residual sits in per-step kernel time on the driver 580.159.03 + cutlass-dsl 4.5.3 combo — a pairing no other cluster runs yet. Discussion in [forum thread 374125](https://forums.developer.nvidia.com/t/glm-5-2-on-a-4x-gb10-cluster-22-tok-s-decode-256k-ctx-recipe/374125).
-</details>
+> 🕵️ **How we got from ~15 → ~23:** it wasn't cutlass, the driver, or NCCL (we suspected all three). One node's GPU was silently wedged at a **quarter of its clock speed**, and in a synchronized TP cluster the slowest GPU gates all four. If your numbers come in low, read [Is your decode slow?](#is-your-decode-slow) before you blame the stack.
 
 ## Stack & build
 
@@ -49,7 +43,7 @@ Every infrastructure suspect has been measured and eliminated: NCCL on RDMA verb
   `draft-quant-packed-mapping`) — apply with `patch -p1` against the installed
   tree; all apply cleanly at that ref.
 - **b12x:** `pip install --no-deps 'git+https://github.com/lukealonso/b12x@9cd63a7'`
-- **cutlass-dsl:** `pip install 'nvidia-cutlass-dsl==4.5.3' 'nvidia-cutlass-dsl-libs-cu13==4.5.3'`
+- **cutlass-dsl:** `pip install 'nvidia-cutlass-dsl==4.6.0' 'nvidia-cutlass-dsl-libs-cu13==4.6.0'` — anything **≥ 4.5.3** works on the new firmware; **4.5.2 does not** (see below). 4.5.3 and 4.6.0 measure identically.
 
 > [!WARNING]
 > **The firmware landmine.** On driver **580.159.03**, every b12x CuteDSL kernel fails to compile under `nvidia-cutlass-dsl==4.5.2` (what pre-firmware recipes implicitly use):
@@ -58,7 +52,7 @@ Every infrastructure suspect has been measured and eliminated: NCCL on RDMA verb
 >   ...nvidia_cutlass_dsl/.../_cute_nvgpu_ops_gen.py: atom_tma_partition
 >   via b12x/cute/compiler.py -> cutlass_dsl/cutlass.py: launch
 > ```
-> Pinning **4.5.3** (above) fixes it. Verified on: driver 580.159.03, ptxas 13.0, torch 2.11.0+cu130.
+> Pinning **≥ 4.5.3** (we run **4.6.0**) fixes it. Verified on driver 580.159.03, CUDA 13.0, torch 2.11.0+cu130, FlashInfer 0.6.15.
 
 - **Image build:** [eugr/spark-vllm-docker](https://github.com/eugr/spark-vllm-docker)
   harness. Three temporary Dockerfile edits are needed to build a fork ref
@@ -126,16 +120,21 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
 
 ## Gotchas (all learned the hard way)
 
-1. **Memory watchdog (scripts/glm-memwatch.sh).** GB10 unified memory means a
-   runaway GPU allocation starves the whole OS — sshd included; our first
-   uncontrolled OOM hard-froze all four nodes (power-cycle recovery). The
-   watchdog `docker kill`s the vLLM container when MemAvailable < 1.5 GiB
-   (1 s poll). Every OOM since has been a clean container kill. The start
-   wrapper arms it automatically for DCP lanes.
+1. **Optional memory watchdog (scripts/glm-memwatch.sh).** GB10 unified memory
+   means a runaway GPU allocation can starve the whole OS — sshd included; an
+   early uncontrolled OOM (a 512K autotune, pre-firmware) hard-froze all four
+   nodes. As insurance, the watchdog `docker kill`s the vLLM container when
+   MemAvailable < 1.5 GiB (1 s poll), and the start wrapper arms it for DCP
+   lanes. Full honesty: in the final config (gmu 0.89) it has **never actually
+   fired** — the head node sits ~3.7 GiB above the floor. It only earns its keep
+   if you run the *tighter* values in Gotcha 2 (gmu 0.90 / 4096 chunks), where
+   the floor genuinely gets breached. Harmless to keep, but don't mistake it for
+   proven — its behavior against a *real* freeze is untested.
 2. **`--max-num-batched-tokens 2048` (recipe: 4096) and `gmu 0.89` (recipe:
    0.90).** Deep prefills (150K+) and long tg benches transiently need more
    activation headroom than the head node has; 4096 chunks and gmu 0.90 both
-   tripped the 1.5 GiB watchdog. Halving the chunk halves the prefill transient
+   drove the head node's MemAvailable down near/through the ~1.5 GiB floor
+   (a failed boot/bench). Halving the chunk halves the prefill transient
    (cost: prefill rate); gmu 0.89 buys ~1.1 GiB more permanent floor per node
    (cost: ~2% KV pool). Head now sits ~3.9 GiB idle. If your nodes run leaner,
    try the recipe's values first.
@@ -195,6 +194,13 @@ than the TP-local one. It works (256K ctx validated) but decodes at ~12–13 t/s
 because that backend's decode can't run under FULL CUDA graphs — the fork's
 b12x path is the right answer today. The patch is included in case upstream
 wants it; it's two small changes.
+
+## Is your decode slow?
+
+Check the boring stuff before blaming the stack. (We blamed the stack for a while. It wasn't the stack.)
+
+- 🐌 **A GPU stuck at low clock — this is the big one.** A GB10 can silently wedge a single GPU at ~660 MHz: it *reports* `P0` but delivers a quarter-clock, stays cold, and draws ~17 W even under full load. In a synchronized TP cluster **the slowest GPU gates all four**, so one lame node quietly capped us at ~15 t/s for an entire session. Burn each GPU for 5 s and read `nvidia-smi --query-gpu=clocks.current.sm,power.draw` — healthy ≈ **2300–2500 MHz / ~90 W**, wedged ≈ **660 MHz / ~17 W**. A **warm reboot won't fix it** (the GPU firmware holds the wedge on standby power); you need a full **cold power cycle** — shut down, *pull the plug for ~30 s*, power back on. `start-glm-5.2.sh` now burn-checks every node in preflight and refuses to launch on a wedged one.
+- 🌐 **Then the fabric.** Slow or lossy prefill → [Lossless RoCE](#lossless-roce-ecn--pfc--optional-worth-it), and remember the switch QoS does nothing without node-side `NCCL_IB_TC`. Confirm NCCL is on RDMA verbs, not TCP.
 
 ## Credits
 

@@ -54,6 +54,36 @@ case "${1:-start}" in
     ;;
 esac
 
+# Preflight: GPU clock-health gate. A GB10 can silently wedge one GPU at
+# ~660 MHz (it reports P0 but delivers a quarter-clock, stays cold, ~17W under
+# load). In a synchronized TP=4 cluster the slowest GPU gates all four, so ONE
+# wedged node quietly caps decode ~30% — and a warm reboot does NOT clear it
+# (the GPU firmware holds the wedge on standby power); only a full COLD power
+# cycle does (pull the plug ~30s). Catch it in ~5s here instead of after a
+# 22-min boot. Healthy ~2300-2500 MHz under a burn; wedged ~660. Override with
+# GLM_SKIP_CLOCK_CHECK=1.
+CLOCK_IMG="${GLM_DCP2_IMAGE:-vllm-node-eldritch-dcp:e232d26-modded}"
+echo "[preflight] GPU clock-health check on all 4 nodes (5s burn each) ..."
+clock_bad=0
+for ip in 11 12 13 14; do
+  mhz=$(ssh -o ConnectTimeout=5 "YOURUSER@192.168.NNN.${ip}" "docker run --rm --gpus all --entrypoint python3 $CLOCK_IMG -c '
+import torch,time,subprocess
+a=torch.randn(8192,8192,device=\"cuda\",dtype=torch.bfloat16)
+t=time.time()
+while time.time()-t<5:(a@a).sum().item()
+print(subprocess.run([\"nvidia-smi\",\"--query-gpu=clocks.current.sm\",\"--format=csv,noheader,nounits\"],capture_output=True,text=True).stdout.split()[0])' 2>/dev/null" 2>/dev/null)
+  if [ -z "$mhz" ]; then echo "  .${ip}: clock probe failed (skipped)"
+  elif [ "$mhz" -lt 1500 ]; then echo "  .${ip}: WEDGED — SM ${mhz} MHz under load (stuck-low-clock bug)"; clock_bad=1
+  else echo "  .${ip}: SM ${mhz} MHz — healthy"; fi
+done
+if [ "$clock_bad" = 1 ] && [ "${GLM_SKIP_CLOCK_CHECK:-0}" != 1 ]; then
+  echo
+  echo "✗ A GPU is stuck at low clock — it will gate the whole TP=4 cluster (~30% slower)."
+  echo "  A warm reboot will NOT fix it. Cleanly shut the wedged node down, PULL its"
+  echo "  power for ~30s, power back on, and re-run. (Or GLM_SKIP_CLOCK_CHECK=1 to force.)"
+  exit 1
+fi
+
 # Memory watchdogs: armed ONLY for the DCP lane. The fast lane is proven
 # stable without them, and its autotune phase transiently dips below the
 # 1.5 GiB line — a watchdog would kill a boot that always succeeds. For the

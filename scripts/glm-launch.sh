@@ -302,6 +302,16 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     # small-message latency-bound: fewer channels = less per-op overhead.
     -e "NCCL_MAX_NCHANNELS=4"
     -e "NCCL_MIN_NCHANNELS=4"
+    # Mesh-mode NCCL (from eugr/spark-vllm-docker) — targets DCP2 decode's
+    # per-step dual-rail ag_rs. Measured +5% (tg512 median TPOT ~64→~61 ms) and
+    # kept: NET_PLUGIN=none forces the built-in IB transport; IB_MERGE_NICS=0
+    # keeps the two 200G rails as separate logical devices; SUBNET_AWARE_ROUTING
+    # picks paths per rail.
+    -e "NCCL_NET_PLUGIN=none"
+    -e "NCCL_IB_MERGE_NICS=0"
+    -e "NCCL_IB_SUBNET_AWARE_ROUTING=1"
+    # Skip vLLM's cudagraph-memory estimation pass (eugr) — frees a little floor.
+    -e "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0"
     # NOT enabled: VLLM_B12X_MLA_SPEC_EXTEND_AS_DECODE=1 (ciprianveg #155,
     # +5-10% at dcp1) — tested 2026-07-11 at DCP2: no decode gain (13.8 vs
     # 12.8-13.9 baseline) and the d8K bench leg tripped the 1.5GiB watchdog
