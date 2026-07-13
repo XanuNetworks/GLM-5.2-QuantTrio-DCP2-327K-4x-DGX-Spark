@@ -1,6 +1,6 @@
 # GLM-5.2 (unpruned) on 4× DGX Spark — depth, max context, or multi-user
 
-**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks. One recipe, one script, three jobs — pick a lane with `GLM_LANE`: **depth** (`dcp2` — 327K single-user, the flagship), **max context** (`dcp4` — 655K single-user), or **multi-user** (the `-cc` lanes — up to 5 concurrent agents). All four lanes share the same stack: TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware. Trade the one KV budget for depth *or* width — that's the whole idea.**
+**Serve the unpruned [GLM-5.2](https://huggingface.co/zai-org/GLM-5.2) (QuantTrio Int4-Int8Mix, all 256 experts) across four GB10 Sparks — one recipe, four lanes, one KV budget spent on **depth or width**. TP4 + DCP + MTP speculative decode + fp8 sparse-MLA KV, tuned for the *current* GB10 firmware.**
 
 ![context](https://img.shields.io/badge/context-up_to_655K-1f6feb)
 ![concurrency](https://img.shields.io/badge/multi--user-up_to_5_agents-1f6feb)
@@ -17,11 +17,22 @@ A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://gi
 > [!WARNING]
 > **Taking the firmware update? Do this first.** On driver 580.159.03, b12x kernels won't compile under `nvidia-cutlass-dsl==4.5.2` (`ValueError: Operation creation failed`) — the version pre-firmware recipes implicitly use. Pin **≥ 4.5.3** (we run 4.6.0). See [Stack](#stack--build).
 
+### Lanes — pick one with `GLM_LANE`
+
+| lane | context | streams | role |
+|---|---|---|---|
+| **`dcp2`** *(default)* | 327K | 1 | 🏆 flagship — max depth + speed (~25 tok/s coherent) |
+| **`dcp4`** | 655K | 1 | max context |
+| **`dcp4-cc200`** | 200K | 3 | multi-user |
+| **`dcp4-cc128`** | 128K | 5 | multi-user, most agents |
+
+All four run the identical fork stack — they differ only in how the one KV budget is split: **depth** (`dcp2`/`dcp4`) or **width** (the `-cc` lanes). Lane map: [scripts/README](scripts/README.md) · per-lane numbers: [benchmarks/](benchmarks/README.md).
+
 ### What you get
 
 - 🧠 **Full model, no pruning** — all 256 experts on 4 nodes, from 128K per stream up to 655K single-user context depending on lane.
 - 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
-- 🔁 **Three jobs, one script** — **depth** (`dcp2`: 327K single-user, ~25 tok/s coherent — flagship), **max context** (`dcp4`: 655K single-user, ~24 coherent), or **multi-user** (`-cc` lanes: `dcp4-cc200` = 3×200K, `dcp4-cc128` = 5×128K, both on DCP4, tuned to fit the pool). One KV budget spent on depth *or* width. Pick with `GLM_LANE`. (Lane map: [scripts/README](scripts/README.md) · per-lane numbers: [benchmarks/](benchmarks/README.md).)
+- 🔁 **One recipe, four lanes** — the same fork stack serves single-user *depth* (`dcp2`/`dcp4`) or multi-user *width* (the `-cc` lanes); switch with one env var (see the table above). Each lane is tuned so its streams fit the KV pool with no preemption.
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
@@ -136,28 +147,23 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
 
 ### Multi-user: the `-cc` lanes
 
-Serving several agents at once? The `-cc` lanes trade per-stream context for width on the
-same fork stack — **`dcp4-cc200`** (3×200K) and **`dcp4-cc128`** (5×128K), both on DCP4. Each
-is tuned (via `gpu-memory-utilization`) so its advertised streams fit the KV pool with **no
-preemption**, while the rank-0 memory stays above the watchdog even under a burst of cold
-prefills. `dcp4-cc128` uses gmu **0.885** — the deliberate sweet spot where the 651K pool
-just fits 5×128K=640K *and* the head survives (0.89 fits the pool but kills the head; 0.88 is
-head-safe but leaves the pool ~5% short).
+Serving several agents at once? Two `-cc` lanes trade per-stream context for width, both on
+DCP4: **`dcp4-cc200`** (3×200K) and **`dcp4-cc128`** (5×128K). Each is tuned so its streams fit
+the KV pool with **no preemption** and the head node stays safe — just pick one and run it.
 
-**Don't judge a concurrency lane by a cold-fill benchmark.** Filling every stream to max
-depth *cold and simultaneously* (0% prefix cache) produces a pathological TTFT — a stress
-artifact, not the serving speed. Real multi-turn agents amortize: each turn only re-prefills
-its *delta* (the resident history is a prefix-cache hit — that's what `clear_thinking:false`
-protects), so per-turn TTFT stays small as context grows.
+**Adjusting concurrency.** `GLM_SEQS` raises or lowers the stream count — it's a *default*, not
+a hard cap:
 
-**Concurrency is a tunable default, not a cap.** `GLM_SEQS` raises or lowers a lane's stream
-count for your workload — there's no enforced maximum. Raising it is usually safe: real
-traffic rarely has every stream at full context at once, so the pool usually isn't exhausted,
-and if it is you get **graceful preemption** (a re-prefill stall on one stream), not a crash.
-The one hard edge to respect: a burst of many *cold deep* prefills at a high `GLM_SEQS` can
-breach the head watchdog (a container restart) — which is exactly the boundary each lane's
-default is tuned to sit below. Numbers + the per-lane tuning guide:
-[scripts/README](scripts/README.md) · [benchmarks/](benchmarks/README.md).
+```bash
+GLM_LANE=dcp4-cc128 GLM_SEQS=6 ./glm-serve.sh start   # 6 agents instead of the default 5
+```
+
+The implications: **more streams = higher total throughput but slower per stream**; and if
+every stream happens to fill to full context at once you may see brief **graceful stalling**
+(one stream re-prefills), never a crash. The single thing to avoid is a burst of many *cold,
+deep* prefills at a high `GLM_SEQS` — that's the boundary each lane's default sits below.
+Why, and how to tune it safely: [concurrency-lane tuning](docs/troubleshooting.md#concurrency-lane-tuning)
+· per-lane numbers: [benchmarks/](benchmarks/README.md).
 
 ## Troubleshooting & gotchas
 
