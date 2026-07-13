@@ -34,7 +34,7 @@ Single-stream (matches llama-benchy methodology), all four GPUs at full clock:
 | Decode — @ 32K context depth | ~20 |
 | Prefill (cold, ~12–17K-token ingest) | ~720 |
 
-Matches CosmicRaisins' reference (~28 agentic). MTP **k=4**, mean acceptance length ~3.0. Single-stream (`max-num-seqs 1`) — this is a one-user, max-speed config, not a concurrent-serving one.
+Matches CosmicRaisins' reference (~28 agentic). MTP **k=4**, mean acceptance length ~3.0. Single-stream (`max-num-seqs 1`) — this is a one-user, max-speed config, not a concurrent-serving one. Reproduce this table with **`utils/benchmark.sh`** (coherent + random floor + cold prefill).
 
 > 📏 **Prose beats random by ~10-15%.** Random-token benches (`--dataset-name random`) tank MTP acceptance — real coherent prompts generate predictable, structured output the draft head accepts far more often, so `tg512`-on-random *understates* real-world decode. The **~25 coherent** figure is what you'll actually see; the ~23 is a pessimistic floor. (Watch out for prefix-cache pollution too — repeated random prompts at a fixed seed cache-hit and report fake-fast prefill.)
 
@@ -200,7 +200,7 @@ small sync ops) and the fabric is now clean instead of accidentally-working.
 
 Check the boring stuff before blaming the stack. (We blamed the stack for a while. It wasn't the stack.)
 
-- 🐌 **A GPU stuck at low clock — this is the big one.** A GB10 can silently wedge a single GPU at ~660 MHz: it *reports* `P0` but delivers a quarter-clock, stays cold, and draws ~17 W even under full load. In a synchronized TP cluster **the slowest GPU gates all four**, so one lame node quietly capped us at ~15 t/s for an entire session. Burn each GPU for 5 s and read `nvidia-smi --query-gpu=clocks.current.sm,power.draw` — healthy ≈ **2300–2500 MHz / ~90 W**, wedged ≈ **660 MHz / ~17 W**. A **warm reboot won't fix it** (the GPU firmware holds the wedge on standby power); you need a full **cold power cycle** — shut down, *pull the plug for ~30 s*, power back on. `glm-serve.sh` now burn-checks every node in preflight and refuses to launch on a wedged one.
+- 🐌 **A GPU stuck at low clock — this is the big one.** A GB10 can silently wedge a single GPU at ~660 MHz: it *reports* `P0` but delivers a quarter-clock, stays cold, and draws ~17 W even under full load. In a synchronized TP cluster **the slowest GPU gates all four**, so one lame node quietly capped us at ~15 t/s for an entire session. Burn each GPU for 5 s and read `nvidia-smi --query-gpu=clocks.current.sm,power.draw` — healthy ≈ **2300–2500 MHz / ~90 W**, wedged ≈ **660 MHz / ~17 W**. A **warm reboot won't fix it** (the GPU firmware holds the wedge on standby power); you need a full **cold power cycle** — shut down, *pull the plug for ~30 s*, power back on. `glm-serve.sh` burn-checks every node in preflight and refuses to launch on a wedged one — or run it on demand: **`utils/check-clocks.sh`**.
 - 🌐 **Then the fabric.** Slow or lossy prefill → [Lossless RoCE](#lossless-roce-ecn--pfc--optional-worth-it), and remember the switch QoS does nothing without node-side `NCCL_IB_TC`. Confirm NCCL is on RDMA verbs, not TCP.
 
 ## Credits
