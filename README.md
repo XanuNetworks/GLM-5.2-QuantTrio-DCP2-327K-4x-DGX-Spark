@@ -20,7 +20,7 @@ A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://gi
 
 - 🧠 **Full model, no pruning** — all 256 experts, at 327K context on 4 nodes.
 - 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
-- 🔁 **Two lanes, one script** — `GLM_LANE=dcp2` for 327K, or the upstream-vLLM fallback at 200K/~25 t/s.
+- 🔁 **Two lanes, one script** — `GLM_LANE=dcp2` for the tested 327K recipe, or a simpler `fast` fallback (200K, upstream vLLM) for anyone not running the fork.
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
@@ -102,7 +102,7 @@ CONFIG block (node IPs, user). Lanes via `GLM_LANE`:
 
 ```bash
 GLM_LANE=dcp2 ./glm-serve.sh start    # this recipe: 327K, DCP2, fork stack
-./glm-serve.sh start                  # fallback lane: 200K, upstream vLLM, ~25 t/s
+./glm-serve.sh start                  # fallback lane: 200K, upstream vLLM (not benchmarked recently)
 ```
 
 Key serve flags for the dcp2 lane (full command in the script):
@@ -195,20 +195,6 @@ in use").
 Payoff was honest: prefill throughput unchanged (drops were ~0.1% of volume),
 but decode picked up ~+10% (queue prioritization trimming latency jitter on the
 small sync ops) and the fabric is now clean instead of accidentally-working.
-
-## Bonus: DCP on *upstream* vLLM (experiment)
-
-Before adopting the fork we got DCP4 running on **upstream** vLLM
-(`ab666069`, eugr build) with the stock `FLASHINFER_MLA_SPARSE_SM120` backend —
-to our knowledge the first DCP run outside the fork. It requires the small
-patch in `upstream-lse-experiment/sm120-return-lse.patch`: FlashInfer 0.6.14's
-`trtllm_batch_decode_with_kv_cache_mla` already supports `return_lse` (which
-DCP's cross-rank merge requires); upstream just never plumbed it through, and
-the decode out-buffer must be sized from the all-gathered head count rather
-than the TP-local one. It works (256K ctx validated) but decodes at ~12–13 t/s
-because that backend's decode can't run under FULL CUDA graphs — the fork's
-b12x path is the right answer today. The patch is included in case upstream
-wants it; it's two small changes.
 
 ## Is your decode slow?
 

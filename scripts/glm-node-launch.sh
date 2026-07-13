@@ -66,34 +66,23 @@ WEIGHTS_DIR="/var/tmp/models"
 KERNELS_DIR="$HOME/glm-triton"
 
 # ---------------------------------------------------------------------------
-# LANE SELECTOR — GLM_LANE=fast (default) or GLM_LANE=dcp
-#
-#   fast: the proven daily driver. 200K ctx, no DCP, FULL graphs, KV 10.95G,
-#         25 tok/s decode, stable through long sessions.
-#   dcp:  the 2026-07-10 context lane (11-boot bring-up). DCP4 shards KV
-#         across ranks: 256K ctx (pool ~512K logical). Measured 12.6 tok/s
-#         shallow / ~7.5 tok/s at 120K depth — decode attention still runs
-#         eager (vLLM downgrades FULL for the SM120 sparse backend) and DCP
-#         adds per-step ag_rs comm. Deep prefills (120K+) can still breach
-#         the memory floor: arm watchdogs (glm-serve.sh does) and treat
-#         as experimental until upstream lands graph-capturable sparse decode.
+# LANE SELECTOR — GLM_LANE=fast (default) or GLM_LANE=dcp2 (this recipe, below).
+#   fast: 200K ctx, upstream vLLM, no DCP — the original simpler config, kept as
+#         a fallback for anyone not running the fork. NOT benchmarked recently;
+#         don't quote a tok/s for it (its old number predates this work).
+#   dcp2: the flagship — 327K ctx, fork stack, DCP2, MTP k=4 (overrides below).
+#         This is the tested/benchmarked path (~25 tok/s coherent).
+# (The experimental upstream-vLLM `dcp` lane was removed; the fork's dcp2 is the
+#  DCP path. See git history for the old upstream-DCP + LSE-patch route.)
 # ---------------------------------------------------------------------------
 GLM_LANE="${GLM_LANE:-fast}"
-if [ "$GLM_LANE" = "dcp" ]; then
-  DCP_FLAGS="--decode-context-parallel-size 4 --dcp-comm-backend ag_rs"
-  LANE_MAXLEN=256000
-  LANE_SEQS=4
-  LANE_KERNELCFG='--kernel-config {"enable_flashinfer_autotune":false}'
-  LANE_KVBYTES=7000000000
-  LANE_COMPCFG='{"cudagraph_mode":"FULL","max_cudagraph_capture_size":32}'
-else
-  DCP_FLAGS=""
-  LANE_MAXLEN=200000
-  LANE_SEQS=6
-  LANE_KERNELCFG=""
-  LANE_KVBYTES=10950000000
-  LANE_COMPCFG='{"cudagraph_mode":"FULL"}'
-fi
+# fast-lane defaults (the dcp2 block far below overrides these wholesale):
+DCP_FLAGS=""
+LANE_MAXLEN=200000
+LANE_SEQS=6
+LANE_KERNELCFG=""
+LANE_KVBYTES=10950000000
+LANE_COMPCFG='{"cudagraph_mode":"FULL"}'
 # ============================================================================
 
 say()  { printf '\n\033[1;36m== %s\033[0m\n' "$*"; }
@@ -161,13 +150,8 @@ ENVV=(
   # (packet_seq_err ~1K/sender per 40K-token prefill); decode is loss-free.
   -e "NCCL_IB_TC=106"
 )
-# V2 model runner: DCP lane ONLY. Needed there for the draft-under-DCP path
-# (fork parity, thread 375416). On the fast lane it silently switches autotune
-# to the V2 mixed dummy-run, which ground all 4 nodes down to ~1 GiB and wedged
-# a previously-reliable boot (2026-07-10). Fast lane = V1 runner, as validated.
-if [ "$GLM_LANE" = "dcp" ]; then
-  ENVV+=(-e "VLLM_USE_V2_MODEL_RUNNER=1")
-fi
+# Fast lane = V1 runner. The dcp2 block sets VLLM_USE_V2_MODEL_RUNNER itself;
+# don't enable it on the fast lane or its autotune dummy-run wedges the boot.
 
 # Triton sparse-MLA kernels, bound read-only over the vLLM tree (matches
 # GLM52_BIND_HOST_TRITON=1). Paths are inside the image's vLLM install.
@@ -187,9 +171,6 @@ KMOUNTS=(
   # upstream vLLM #46862: fused indexer Q rope+fp8-quant (fused_indexer_q_rope_quant)
   -v "$KERNELS_DIR/sparse_attn_indexer.py:$LAYERS/sparse_attn_indexer.py:ro"
   -v "$KERNELS_DIR/deepseek_v2.py:$MODELS/deepseek_v2.py:ro"
-  # glm52-dcp: SM120 sparse impl patched to return decode LSE (DCP requirement).
-  # FlashInfer 0.6.14's kernel supports return_lse; upstream never plumbed it.
-  -v "$HOME/glm-dcp-patches/flashinfer_mla_sparse_sm120.py:$MLA/flashinfer_mla_sparse_sm120.py:ro"
 )
 
 # docker run base — IB passthrough is REQUIRED (without --device=/dev/infiniband

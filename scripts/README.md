@@ -34,9 +34,8 @@ Config differences are **lanes**, selected with `GLM_LANE`, defined inside
 
 | `GLM_LANE` | ctx | stack | notes |
 |---|---|---|---|
-| `dcp2` (this recipe) | 327K | fork vLLM + b12x, DCP2, MTP k=4 | the flagship |
-| `fast` (default) | 200K | upstream vLLM | proven daily driver, ~25 t/s |
-| `dcp` (experimental) | 256K | upstream vLLM + LSE patch | slower (~12 t/s); the "Bonus" path |
+| `dcp2` (this recipe) | 327K | fork vLLM + b12x, DCP2, MTP k=4 | the flagship; tested (~25 t/s coherent) |
+| `fast` (default) | 200K | upstream vLLM, no DCP | simpler fallback; **not benchmarked recently** |
 
 ```bash
 GLM_LANE=dcp2 ./glm-serve.sh start     # 327K flagship
