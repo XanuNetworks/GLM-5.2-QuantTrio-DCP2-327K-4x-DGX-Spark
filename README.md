@@ -20,7 +20,7 @@ A follower-replicable deployment of [CosmicRaisins' DCP2-320K recipe](https://gi
 
 - 🧠 **Full model, no pruning** — all 256 experts, at 327K context on 4 nodes.
 - 📏 **Flat to depth** — decode holds within ~8% from 0 → 32K, verified coherent at a 156K-deep retrieval.
-- 🔁 **Two lanes, one script** — `dcp2` (327K, single-user, ~25 tok/s coherent) or `concurrent` (200K, multi-user, ~50 tok/s aggregate / ~18 each at c=3). Same fork stack, pick with `GLM_LANE`. (Details: [scripts/README](scripts/README.md).)
+- 🔁 **Three lanes, one script** — `dcp2` (327K single-user, ~25 tok/s coherent), `concurrent` (200K multi-user, ~50 tok/s aggregate at c=3), or `dcp4` (655K max-context). Same fork stack, pick with `GLM_LANE`. (Details: [scripts/README](scripts/README.md).)
 - 🛡️ **Sane ops** — auto-reapplied lossless-RoCE fabric config, per-node RoCE GID auto-detect, a GPU clock-health preflight, and an optional unified-memory watchdog for tighter configs.
 
 ### Benchmarks
@@ -103,6 +103,7 @@ CONFIG block (node IPs, user). Lanes via `GLM_LANE`:
 ```bash
 ./glm-serve.sh start                      # default lane = dcp2: 327K, single-user, max-speed
 GLM_LANE=concurrent ./glm-serve.sh start  # multi-user: 200K, c=2/c=3, ~50 t/s aggregate
+GLM_LANE=dcp4 ./glm-serve.sh start        # max context: 655K, single-user (~24 t/s coherent)
 ```
 
 Key serve flags for the dcp2 lane (full command in the script):

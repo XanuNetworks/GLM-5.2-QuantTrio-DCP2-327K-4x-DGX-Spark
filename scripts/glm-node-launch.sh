@@ -66,16 +66,18 @@ WEIGHTS_DIR="/var/tmp/models"
 KERNELS_DIR="$HOME/glm-triton"
 
 # ---------------------------------------------------------------------------
-# LANE SELECTOR — both lanes run the fork stack, differing ONLY in
-# context-vs-concurrency (detail + how to add a lane: scripts/README.md):
-#   dcp2       — 327K ctx, single-user, max-speed  → flagship (~25 t/s coherent)
-#   concurrent — 200K ctx, multi-user (c=2/c=3)    → ~50 t/s aggregate, ~18 each
+# LANE SELECTOR — all lanes run the same fork stack, differing ONLY in
+# context / concurrency / DCP size (detail + how to add a lane: scripts/README.md):
+#   dcp2       — 327K ctx, c=1, DCP2  → flagship (~25 t/s coherent)
+#   concurrent — 200K ctx, c=3, DCP2  → multi-user (~50 t/s aggregate, ~18 each)
+#   dcp4       — 655K ctx, c=1, DCP4  → max-context specialty (~24 t/s coherent)
 # ---------------------------------------------------------------------------
 GLM_LANE="${GLM_LANE:-dcp2}"
 case "$GLM_LANE" in
-  dcp2)       L_MAXLEN=327680; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10 ;;
-  concurrent) L_MAXLEN=200000; L_SEQS=3; L_BATCHED=4096; L_CAPTURE=16 ;;
-  *) echo "GLM_LANE must be 'dcp2' (327K, c=1) or 'concurrent' (200K, c=3); got '$GLM_LANE'" >&2; exit 1 ;;
+  dcp2)       L_MAXLEN=327680; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10; L_DCP=2 ;;
+  concurrent) L_MAXLEN=200000; L_SEQS=3; L_BATCHED=4096; L_CAPTURE=16; L_DCP=2 ;;
+  dcp4)       L_MAXLEN=655360; L_SEQS=1; L_BATCHED=2048; L_CAPTURE=10; L_DCP=4 ;;
+  *) echo "GLM_LANE must be dcp2 (327K,c=1), concurrent (200K,c=3), or dcp4 (655K,c=1); got '$GLM_LANE'" >&2; exit 1 ;;
 esac
 # ============================================================================
 
@@ -176,7 +178,7 @@ BASE=(
 # host Triton kernel mounts and the LSE patch mount MUST be dropped (they'd
 # shadow fork files with incompatible upstream-era code).
 # ---------------------------------------------------------------------------
-if [ "$GLM_LANE" = "dcp2" ] || [ "$GLM_LANE" = "concurrent" ]; then
+if [ "$GLM_LANE" = "dcp2" ] || [ "$GLM_LANE" = "concurrent" ] || [ "$GLM_LANE" = "dcp4" ]; then
   IMAGE="vllm-node-eldritch-dcp:e232d26-modded"
   KMOUNTS=(
     # glm52-gb10 prewarm-tolerance patch (tony's NF3 fix pattern): sm_121a
@@ -240,7 +242,7 @@ if [ "$GLM_LANE" = "dcp2" ] || [ "$GLM_LANE" = "concurrent" ]; then
     # prefix for cache hits (snappy multi-turn); context cost is fine at 327K.
     --default-chat-template-kwargs '{"clear_thinking":false}'
     --tensor-parallel-size 4 --pipeline-parallel-size 1
-    --decode-context-parallel-size 2 --dcp-kv-cache-interleave-size 1
+    --decode-context-parallel-size ${L_DCP} --dcp-kv-cache-interleave-size 1
     --attention-backend B12X_MLA_SPARSE
     # batched-tokens 2048 (recipe: 4096): the 150K-deep prefill's activation
     # transient drove the head through the ~1.5 GiB floor (1.48 GiB, 18:19).

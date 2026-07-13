@@ -35,9 +35,9 @@ Config differences are **lanes**, selected with `GLM_LANE`, defined inside
 |---|---|---|---|---|
 | **`dcp2`** (default) | 327K | c=1 | ~25 t/s coherent | 🏆 flagship — single-user, max depth + speed |
 | **`concurrent`** | 200K | c=2/c=3 | ~50 t/s aggregate · ~18 each @ c=3 · TTFT ~1.3 s | multi-user serving |
-| `dcp4` *(future)* | 655K | c=1 | — | max-context specialty (DCP4); not yet added |
+| **`dcp4`** | 655K | c=1 | ~24 t/s coherent | max-context specialty (DCP4's 4× KV) |
 
-Both run the identical fork stack (image, b12x, MTP k=4, mesh-NCCL, `index_topk_pattern`, `clear_thinking`) — they differ **only** in `max-model-len` / `max-num-seqs` / cudagraph capture. DCP2 stays on for both; its 2× KV sharding is what lets `concurrent` fit 3×200K.
+All three run the identical fork stack (image, b12x, MTP k=4, mesh-NCCL, `index_topk_pattern`, `clear_thinking`) — they differ **only** in `max-model-len` / `max-num-seqs` / cudagraph capture / DCP size. DCP shards the KV, so it's really one budget you spend on *context* (dcp4 → 655K single-stream) or *concurrency* (concurrent → 3×200K on DCP2).
 
 ```bash
 GLM_LANE=dcp2 ./glm-serve.sh start     # 327K flagship
