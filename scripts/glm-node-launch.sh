@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# LAYER 2/3 — PER-NODE LAUNCHER (internal; called by glm-serve.sh). Builds the
+# vLLM flags/env/mounts for the chosen GLM_LANE and issues `docker run` on each
+# node. Runnable standalone with --dry-run / --stop. See scripts/README.md.
 #
 # launch.sh — start GLM-5.2 (TP=4) across a 4-node GB10 / DGX Spark cluster.
 #
@@ -72,7 +75,7 @@ KERNELS_DIR="$HOME/glm-triton"
 #         shallow / ~7.5 tok/s at 120K depth — decode attention still runs
 #         eager (vLLM downgrades FULL for the SM120 sparse backend) and DCP
 #         adds per-step ag_rs comm. Deep prefills (120K+) can still breach
-#         the memory floor: arm watchdogs (start-glm-5.2.sh does) and treat
+#         the memory floor: arm watchdogs (glm-serve.sh does) and treat
 #         as experimental until upstream lands graph-capturable sparse decode.
 # ---------------------------------------------------------------------------
 GLM_LANE="${GLM_LANE:-fast}"
@@ -198,7 +201,7 @@ BASE=(
   -v "$WEIGHTS_DIR:/cache/huggingface"
   -v /etc/passwd:/etc/passwd:ro -v /etc/group:/etc/group:ro
   # Per-node RoCE GID auto-detect wrapper (adapted from DeepSeek-DSpark).
-  -v "$HOME/vllm/glm52-entrypoint.sh:/glm52-entrypoint.sh:ro"
+  -v "$HOME/vllm/glm-container-entrypoint.sh:/glm-container-entrypoint.sh:ro"
 )
 
 # The serving command, with {port} resolved.
@@ -206,7 +209,7 @@ BASE=(
 # image (patches/fix-indexer-mtp-overhang.py, README step h) — unpatched vLLM
 # crashes at >= 3 concurrent requests with MTP enabled.
 SERVE=(
-  /glm52-entrypoint.sh
+  /glm-container-entrypoint.sh
   vllm serve /cache/huggingface/hub/glm52-int4-int8mix
   --served-model-name glm-5.2 --host 0.0.0.0 --port "$PORT"
   --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice
@@ -295,7 +298,7 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     # idx=3 on all nodes. DCP does per-layer per-step ag_rs, so both rails help
     # the collective. (For the record, the decode gap that had us chasing rails/
     # channels/cutlass was NOT any of them — it was a GPU stuck at 1/4 clock;
-    # see the clock-health preflight in start-glm-5.2.sh.)
+    # see the clock-health preflight in glm-serve.sh.)
     -e "NCCL_IB_HCA=rocep1s0f0,roceP2p1s0f0"
     -e "NCCL_SOCKET_IFNAME=enp1s0f0np0,enP2p1s0f0np0"
     # Channels 8 -> 4 for DCP (overrides the global pin; docker takes the last
@@ -320,7 +323,7 @@ if [ "$GLM_LANE" = "dcp2" ]; then
     # (extra workspace from the decode-shaped verify path). Reverted.
   )
   SERVE=(
-    /glm52-entrypoint.sh
+    /glm-container-entrypoint.sh
     vllm serve /cache/huggingface/hub/glm52-int4-int8mix
     --served-model-name glm-5.2 --host 0.0.0.0 --port "$PORT"
     --trust-remote-code --reasoning-parser glm45 --tool-call-parser glm47 --enable-auto-tool-choice

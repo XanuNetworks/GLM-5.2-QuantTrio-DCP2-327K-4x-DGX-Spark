@@ -96,13 +96,13 @@ Also stage NCCL 2.30.4's `libnccl.so.2` at `/var/tmp/models/hub/nccl-2.30.4/`
 
 ## Launch
 
-`scripts/glm-launch.sh` (adapted from tonyd2wild's launcher, itself from
-CosmicRaisins') + `scripts/start-glm-5.2.sh` wrapper. Edit the marked
+`scripts/glm-node-launch.sh` (adapted from tonyd2wild's launcher, itself from
+CosmicRaisins') + `scripts/glm-serve.sh` wrapper. Edit the marked
 CONFIG block (node IPs, user). Lanes via `GLM_LANE`:
 
 ```bash
-GLM_LANE=dcp2 ./start-glm-5.2.sh start    # this recipe: 327K, DCP2, fork stack
-./start-glm-5.2.sh start                  # fallback lane: 200K, upstream vLLM, ~25 t/s
+GLM_LANE=dcp2 ./glm-serve.sh start    # this recipe: 327K, DCP2, fork stack
+./glm-serve.sh start                  # fallback lane: 200K, upstream vLLM, ~25 t/s
 ```
 
 Key serve flags for the dcp2 lane (full command in the script):
@@ -152,7 +152,7 @@ Two flags deserve emphasis (both CosmicRaisins' findings, reproduced here):
    (cost: ~2% KV pool). Head now sits ~3.9 GiB idle. If your nodes run leaner,
    try the recipe's values first.
 3. **RoCE GID index can differ per node** (ours did pre-firmware: 3/3/4/4).
-   `scripts/glm52-entrypoint.sh` is bind-mounted and auto-detects the RoCEv2
+   `scripts/glm-container-entrypoint.sh` is bind-mounted and auto-detects the RoCEv2
    IPv4 GID at container start instead of hardcoding `NCCL_IB_GID_INDEX`.
 4. **Do not run periodic drop_caches during weight load** (it starves
    read-ahead and can stall a rank into the 1800 s Gloo timeout, collapsing
@@ -185,9 +185,9 @@ diffed around an isolated ~78K-token prefill):
 The catch that cost us an afternoon: the switch QoS config does **nothing** on
 its own — NCCL sends at DSCP 0 by default and sails past every classifier. The
 missing key is node-side `NCCL_IB_TC=106` (→ DSCP 26, which the switch then maps
-to the RoCE traffic class), already set in `scripts/glm-launch.sh`. PFC on the
+to the RoCE traffic class), already set in `scripts/glm-node-launch.sh`. PFC on the
 NICs is `mlnx_qos -i <dev> --trust dscp --pfc 0,0,0,1,0,0,0,0` on both rails per
-node — needs root and isn't reboot-persistent, so `start-glm-5.2.sh` reapplies
+node — needs root and isn't reboot-persistent, so `glm-serve.sh` reapplies
 it in preflight via a privileged container (`--privileged --network host --pid
 host`; **`--pid host` is required** or the netlink bind fails "Address already
 in use").
@@ -214,7 +214,7 @@ wants it; it's two small changes.
 
 Check the boring stuff before blaming the stack. (We blamed the stack for a while. It wasn't the stack.)
 
-- 🐌 **A GPU stuck at low clock — this is the big one.** A GB10 can silently wedge a single GPU at ~660 MHz: it *reports* `P0` but delivers a quarter-clock, stays cold, and draws ~17 W even under full load. In a synchronized TP cluster **the slowest GPU gates all four**, so one lame node quietly capped us at ~15 t/s for an entire session. Burn each GPU for 5 s and read `nvidia-smi --query-gpu=clocks.current.sm,power.draw` — healthy ≈ **2300–2500 MHz / ~90 W**, wedged ≈ **660 MHz / ~17 W**. A **warm reboot won't fix it** (the GPU firmware holds the wedge on standby power); you need a full **cold power cycle** — shut down, *pull the plug for ~30 s*, power back on. `start-glm-5.2.sh` now burn-checks every node in preflight and refuses to launch on a wedged one.
+- 🐌 **A GPU stuck at low clock — this is the big one.** A GB10 can silently wedge a single GPU at ~660 MHz: it *reports* `P0` but delivers a quarter-clock, stays cold, and draws ~17 W even under full load. In a synchronized TP cluster **the slowest GPU gates all four**, so one lame node quietly capped us at ~15 t/s for an entire session. Burn each GPU for 5 s and read `nvidia-smi --query-gpu=clocks.current.sm,power.draw` — healthy ≈ **2300–2500 MHz / ~90 W**, wedged ≈ **660 MHz / ~17 W**. A **warm reboot won't fix it** (the GPU firmware holds the wedge on standby power); you need a full **cold power cycle** — shut down, *pull the plug for ~30 s*, power back on. `glm-serve.sh` now burn-checks every node in preflight and refuses to launch on a wedged one.
 - 🌐 **Then the fabric.** Slow or lossy prefill → [Lossless RoCE](#lossless-roce-ecn--pfc--optional-worth-it), and remember the switch QoS does nothing without node-side `NCCL_IB_TC`. Confirm NCCL is on RDMA verbs, not TCP.
 
 ## Credits

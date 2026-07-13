@@ -1,7 +1,10 @@
 #!/bin/bash
+# LAYER 1/3 — WRAPPER (run this). Preflight (clock check, watchdog, PFC, cache
+# drop, staging) then calls glm-node-launch.sh. Pick config via GLM_LANE. See
+# scripts/README.md for the layer chain and how to add a lane.
 # Start GLM-5.2-Int4-Int8Mix (TP=4) across all 4 Sparks (.11 head, .12/.13/.14 workers).
 #
-# Wrapper around ~/vllm/glm-launch.sh — tony's launch.sh adapted for this cluster
+# Wrapper around ~/vllm/glm-node-launch.sh — tony's launch.sh adapted for this cluster
 # (NODES, users, IPs, image name). See project_glm_5_2_cluster.md for full details.
 #
 # Endpoint:  http://192.168.NNN.1:8000/v1  (served-model-name: glm-5.2)
@@ -9,18 +12,18 @@
 # Cold boot: ~12 min weight load + ~10 min cudagraph warmup = ~22 min to serve
 #
 # Usage:
-#   ./start-glm-5.2.sh           # start
-#   ./start-glm-5.2.sh stop      # stop containers on all 4 nodes
-#   ./start-glm-5.2.sh status    # /v1/models probe + container ps
-#   ./start-glm-5.2.sh logs      # tail head-node container logs
-#   ./start-glm-5.2.sh dry-run   # print the docker commands without running
+#   ./glm-serve.sh           # start
+#   ./glm-serve.sh stop      # stop containers on all 4 nodes
+#   ./glm-serve.sh status    # /v1/models probe + container ps
+#   ./glm-serve.sh logs      # tail head-node container logs
+#   ./glm-serve.sh dry-run   # print the docker commands without running
 
 set -e
 
 HEAD_IP="192.168.NNN.1"
 PORT=8000
 CONTAINER="vllm_glm52"
-LAUNCH="$HOME/vllm/glm-launch.sh"
+LAUNCH="$HOME/vllm/glm-node-launch.sh"
 
 case "${1:-start}" in
   stop)

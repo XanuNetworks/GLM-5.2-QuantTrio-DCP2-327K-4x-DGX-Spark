@@ -1,5 +1,8 @@
 #!/bin/bash
-# glm52-entrypoint.sh — auto-detect the RoCEv2 IPv4 GID index before exec.
+# LAYER 3/3 — IN-CONTAINER ENTRYPOINT (internal; runs inside each container,
+# bind-mounted by glm-node-launch.sh). Auto-detects the RoCEv2 GID, then execs
+# the real `vllm serve`. Not run directly. See scripts/README.md.
+# glm-container-entrypoint.sh — auto-detect the RoCEv2 IPv4 GID index before exec.
 # Per-node GID index for the same-named HCA differs across our Sparks (.11/.12
 # use idx=3, .13/.14 use idx=4 depending on firmware/init order), so hardcoding
 # NCCL_IB_GID_INDEX in the docker env crashes ibv_modify_qp on the odd node.
